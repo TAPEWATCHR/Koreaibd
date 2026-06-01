@@ -27,7 +27,7 @@ def init_db():
 
 def fetch_market_leaders():
     """네이버 금융 시가총액 상위 페이지에서 주도주 후보군(코스피/코스닥 상위 각 250종목) 추출"""
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, Gecko) Chrome/120.0.0.0 Safari/537.36'}
     candidate_stocks = []
     
     for sosok in [0, 1]:
@@ -71,7 +71,6 @@ def fetch_market_leaders():
 
 def analyze_stock_history(ticker, debug=False):
     """네이버 차트 엔진에서 1년치 일별 데이터를 가져와 RS 및 AD 메트릭 연산"""
-    # 🌟 [핵심 수정] 차트 엔진에도 완벽한 브라우저 헤더를 제공하여 차단 우회
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8'
@@ -83,11 +82,20 @@ def analyze_stock_history(ticker, debug=False):
             if debug: print(f"   ↳ [디버그] {ticker} HTTP 에러 코드: {res.status_code}")
             return None
             
-        if b"item" not in res.content:
-            if debug: print(f"   ↳ [디버그] {ticker} 응답 데이터 비어있음 (차단 의심)")
+        # 🌟 [인코딩 에러 핵심 해결부] 
+        # 1. 바이너리 데이터를 EUC-KR로 명시적 디코딩하여 파이썬 표준 문자열로 변환
+        xml_text = res.content.decode('euc-kr', errors='ignore')
+        
+        # 2. 파서가 거부감을 느끼는 구식 머리말(<?xml ... ?>) 강제 제거
+        if xml_text.strip().startswith('<?xml'):
+            xml_text = xml_text.split('?>', 1)[1].strip()
+            
+        if not xml_text or "item" not in xml_text:
+            if debug: print(f"   ↳ [디버그] {ticker} 응답 데이터가 올바르지 않음")
             return None
 
-        root = ET.fromstring(res.content)
+        # 3. 깨끗해진 순수 XML 문자열을 파싱
+        root = ET.fromstring(xml_text)
         items = root.findall('.//item')
         
         prices = []
@@ -139,7 +147,6 @@ def update_kr_data():
     valid_results = []
     print("⏳ 종목별 상세 시계열 데이터 분석 중...")
     for idx, s in enumerate(base_stocks):
-        # 처음 3개 종목은 문제가 발생할 경우 로그로 확인할 수 있게 디버그 ON
         debug_mode = True if idx < 3 else False
         hist_metrics = analyze_stock_history(s['ticker'], debug=debug_mode)
         if not hist_metrics: continue
