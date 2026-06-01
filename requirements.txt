@@ -2,7 +2,6 @@ streamlit
 pandas
 requests
 beautifulsoup4
-deep_translator
+lxml
 streamlit-gsheets-connection
 altair
-lxml
