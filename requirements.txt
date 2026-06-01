@@ -3,5 +3,5 @@ pandas
 requests
 beautifulsoup4
 lxml
-streamlit-gsheets-connection
+st-gsheets-connection
 altair
