@@ -2,37 +2,33 @@
 import streamlit as st
 import pandas as pd
 import sqlite3
-import requests
+import yfinance as yf
 import streamlit.components.v1 as components
 import os
 import altair as alt
-from deep_translator import GoogleTranslator
 from streamlit_gsheets import GSheetsConnection
 
-# --- 🔑 API 키 로드 방식을 Streamlit Secrets와 환경 변수 모두 지원하도록 고도화 ---
-FMP_API_KEY = ""
-if "FMP_API_KEY" in st.secrets:
-    FMP_API_KEY = st.secrets["FMP_API_KEY"]
-elif os.environ.get("FMP_API_KEY"):
-    FMP_API_KEY = os.environ.get("FMP_API_KEY")
-FMP_API_KEY = FMP_API_KEY.strip()
-
-# --- 🔤 [국내 주식 최적화] 트레이딩뷰와 FMP의 한국 주식 심볼 포맷 변환 함수 ---
+# --- 🔤 [한국 주식 심볼 최적화] ---
 def clean_tv_symbol(symbol):
-    """트레이딩뷰 위젯용: 한국 주식은 반드시 KRX:6자리코드 형태여야 함 (예: 005930.KS -> KRX:005930)"""
+    """트레이딩뷰용: 한국 주식은 KRX:6자리코드 (예: 005930.KS -> KRX:005930)"""
     if not symbol: return ""
     raw = str(symbol).strip().upper()
-    # 마침표(.)나 하이픈(-) 뒤의 시장 기호 제거하고 오직 6자리 종목코드만 추출
     base = raw.split('.')[0].split('-')[0]
     if base.isdigit() and len(base) == 6:
         return f"KRX:{base}"
     return raw
 
-def clean_fmp_symbol(symbol):
-    """FMP API 요청용: 한국 주식은 마침표 형태를 사용함 (예: 005930-KS -> 005930.KS)"""
+def clean_yf_symbol(symbol):
+    """Yahoo Finance용: 6자리코드 뒤에 시장에 따라 .KS 또는 .KQ가 붙어야 함"""
     if not symbol: return ""
     raw = str(symbol).strip().upper()
-    return raw.replace('-', '.')
+    if '.' in raw or '-' in raw:
+        raw = raw.replace('-', '.')
+        return raw
+    # 만약 6자리 숫자만 들어왔을 경우 기본적으로 .KS(코스피)로 가정 (필요시 DB 구조에 맞게 수정)
+    if len(raw) == 6 and raw.isdigit():
+        return f"{raw}.KS"
+    return raw
 
 def init_db():
     conn = sqlite3.connect('ibd_system.db')
@@ -87,52 +83,30 @@ def toggle_favorite_gsheet(symbol):
         st.error(f"🚨 구글 시트 저장 실패: {e}")
         return False
 
-# --- 🧾 FMP 한국 주식 심볼 매칭 및 API 에러 메시지 반환 추적 로직 ---
+# --- 🧾 [수정] FMP를 제거하고 yfinance로 한국 주식 재무제표 크롤링 ---
 @st.cache_data(ttl=3600)
-def get_fin_data(ticker):
-    if not FMP_API_KEY: 
-        return [], [], [], {}, "FMP_API_KEY를 탐지할 수 없습니다. Secrets 설정을 확인하세요."
-    
-    # FMP가 인식할 수 있는 규격(005930.KS 형태)으로 심볼 정제
-    fmp_ticker = clean_fmp_symbol(ticker)
-    
+def get_fin_data_yf(ticker):
+    yf_ticker = clean_yf_symbol(ticker)
     try:
-        url_is_ann = f"https://financialmodelingprep.com/stable/income-statement?symbol={fmp_ticker}&period=annual&limit=5&apikey={FMP_API_KEY}"
-        res_is = requests.get(url_is_ann)
-        is_ann = res_is.json()
+        stock = yf.Ticker(yf_ticker)
         
-        # FMP API가 에러 메시지를 반환한 경우 처리
-        if isinstance(is_ann, dict) and ("Error Message" in is_ann or "error" in is_ann):
-            msg = is_ann.get("Error Message", is_ann.get("error", "인증 실패 또는 플랜 제한 오류"))
-            return [], [], [], {}, f"FMP API 에러: {msg}"
+        # 연간 재무제표 및 분기 재무제표 로드
+        ann_financials = stock.financials
+        qtr_financials = stock.quarterly_financials
+        ann_balance = stock.balance_sheet
+        info = stock.info
         
-        url_bs_ann = f"https://financialmodelingprep.com/stable/balance-sheet-statement?symbol={fmp_ticker}&period=annual&limit=5&apikey={FMP_API_KEY}"
-        bs_ann = requests.get(url_bs_ann).json()
-        
-        url_is_qtr = f"https://financialmodelingprep.com/stable/income-statement?symbol={fmp_ticker}&period=quarter&limit=12&apikey={FMP_API_KEY}"
-        is_qtr = requests.get(url_is_qtr).json()
-        
-        url_prof = f"https://financialmodelingprep.com/stable/profile?symbol={fmp_ticker}&apikey={FMP_API_KEY}"
-        p_res = requests.get(url_prof).json()
-        info = p_res[0] if p_res and isinstance(p_res, list) else {}
-        
-        return is_ann, bs_ann, is_qtr, info, None
-    except Exception as e: 
-        return [], [], [], {}, f"API 요청 중 네트워크 예외 발생: {str(e)}"
+        return ann_financials, ann_balance, qtr_financials, info, None
+    except Exception as e:
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), {}, f"데이터 로드 중 오류 발생: {str(e)}"
 
-def format_currency(val):
+def format_currency_krw(val):
     try:
         val = float(val)
         if pd.isna(val) or val == 0: return "0"
-        return f"{int(val / 1000):,}"
+        # yfinance는 원화 원본 단위로 제공하므로 보기 편하게 '억 원' 단위로 변환해 출력
+        return f"{val / 100000000:,.1f}억"
     except: return "0"
-
-def calc_growth(current, previous):
-    try:
-        current, previous = float(current), float(previous)
-        if pd.isna(current) or pd.isna(previous) or previous == 0: return None
-        return ((current - previous) / abs(previous)) * 100
-    except: return None
 
 def format_growth(val):
     if pd.isna(val) or val is None: return "-"
@@ -164,9 +138,6 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-if not FMP_API_KEY:
-    st.error("🚨 FMP_API_KEY가 탐지되지 않았습니다. .streamlit/secrets.toml 설정 혹은 환경 변수를 등록해 주세요.")
-
 init_db()
 df = get_data()
 fav_list = get_favorites_from_gsheet()
@@ -178,7 +149,7 @@ if not df.empty:
     if 'smr_grade' not in df.columns: df['smr_grade'] = 'C'
     if 'industry' not in df.columns: df['industry'] = 'Unknown'
 
-    with st.sidebar:
+    with St.sidebar:
         is_mobile = st.toggle("📱 모바일 화면 최적화", value=False)
         st.divider()
         st.header("필터")
@@ -224,7 +195,6 @@ if not df.empty:
         ad_sel = btn_filter("AD 수급 등급", "ad_sel")
         show_fav_only = st.checkbox("⭐ 관심종목만 보기", value=False)
 
-    # 거래대금 단위 환산 반영 (억 원 단위를 원 단위로 매칭할 경우 등의 로직 유지)
     mask = (df['price'] >= min_p) & (df['rs_score'] >= rs_m) & \
            (df['adv_50'] >= min_adv_m * 100000000) & (df['industry_rs_score'] >= ind_rs_m) & \
            (df['smr_grade'].isin(smr_sel)) & (df['ad_grade'].isin(ad_sel)) & \
@@ -241,7 +211,7 @@ if not df.empty:
         display_df.rename(columns={'symbol': '종목', 'price': '가격', 'rs_score': 'RS점수', 'smr_grade': 'SMR등급', 'ad_grade': 'AD등급'}, inplace=True)
     else:
         display_df = display_df[['symbol', 'price', 'rs_score', 'industry_rs_score', 'smr_grade', 'ad_grade', 'adv_50', 'industry']]
-        display_df.rename(columns={'symbol': '종목', 'price': '가격', 'adv_50': '50일 평균 거래대', 'rs_score': 'RS점수', 'industry_rs_score': '산업군RS점수', 'smr_grade': 'SMR등급', 'ad_grade': 'AD등급', 'industry': '산업군명'}, inplace=True)
+        display_df.rename(columns={'symbol': '종목', 'price': '가격', 'adv_50': '50일 평균 거래대금', 'rs_score': 'RS점수', 'industry_rs_score': '산업군RS점수', 'smr_grade': 'SMR등급', 'ad_grade': 'AD등급', 'industry': '산업군명'}, inplace=True)
 
     if is_mobile:
         st.subheader(f"주도주 리스트 ({len(display_df)})")
@@ -268,12 +238,12 @@ if not df.empty:
                 if st.button("★ 관심해제" if is_fav else "☆ 관심저장", use_container_width=True):
                     if toggle_favorite_gsheet(ticker): st.rerun()
             
-            is_ann_raw, bs_ann_raw, is_qtr_raw, info, fmp_error = get_fin_data(ticker)
+            # yfinance 데이터 호출
+            ann_fin, ann_bs, qtr_fin, info, yf_error = get_fin_data_yf(ticker)
             t_chart, t_check, t_fin, t_biz = st.tabs(["📊 차트", "🛡️ 체크리스트", "🧾 재무제표", "🏢 기업 개요"])
             
             with t_chart:
                 chart_height = 350 if is_mobile else 500
-                # 💡 [핵심 수정] 한국 주식 규격에 맞게 트레이딩뷰 위젯 심볼 자동 정제 (KRX:6자리코드)
                 tv_ticker = clean_tv_symbol(ticker)
                 tv_widget = f"""
                 <div class="tradingview-widget-container" style="height: {chart_height}px; width: 100%;">
@@ -323,77 +293,80 @@ if not df.empty:
                 for c in canslim:
                     st.markdown(f'<div class="check-box {"check-pass" if c["pass"] else "check-fail"}">{"✅" if c["pass"] else "❌"} {c["name"]}</div>', unsafe_allow_html=True)
 
-                st.markdown("#### 마크 미너비니 (Minervini VCP) 전략")
-                minervini = [
-                    {"name": "최소 주가 필터 통과", "pass": price_val >= min_p},
-                    {"name": "주도주 모멘텀: RS 점수 70 이상", "pass": rs_val >= 70},
-                    {"name": "펀더멘탈: SMR 등급 A 또는 B", "pass": smr_val in ['A', 'B']},
-                    {"name": "매집 흔적: AD 수급 등급 A, B, C", "pass": ad_val in ['A', 'B', 'C']},
-                    {"name": "유동성: 거래대금 조건 충족", "pass": adv_val >= min_adv_m * 100000000}
-                ]
-                for c in minervini:
-                    st.markdown(f'<div class="check-box {"check-pass" if c["pass"] else "check-fail"}">{"✅" if c["pass"] else "❌"} {c["name"]}</div>', unsafe_allow_html=True)
-
             with t_fin:
-                if fmp_error:
-                    st.error(f"🚨 {fmp_error}")
-                    
-                st.caption("단위: 보고 통화 기준 (천 단위) / 성장률: %")
+                if yf_error:
+                    st.error(f"🚨 {yf_error}")
                 
-                def safe_parse(data_list, keys, required_key):
-                    if not isinstance(data_list, list) or len(data_list) == 0: return pd.DataFrame()
-                    if required_key not in data_list[0]: return pd.DataFrame()
-                    parsed = [{k: item.get(k) if item.get(k) is not None else 0 for k in keys} for item in data_list]
-                    return pd.DataFrame(parsed)
-
-                req_is_ann = ['calendarYear', 'revenue', 'operatingIncome', 'netIncome', 'ebitda']
-                req_bs_ann = ['calendarYear', 'totalAssets', 'totalLiabilities', 'totalStockholdersEquity']
+                st.caption("단위: 억 원 (KRW) / 성장률: %")
                 
-                is_ann_df = safe_parse(is_ann_raw, req_is_ann, 'calendarYear')
-                bs_ann_df = safe_parse(bs_ann_raw, req_bs_ann, 'calendarYear')
-
-                if not is_ann_df.empty and not bs_ann_df.empty:
-                    st.markdown("#### 📅 연간 재무 및 성장률 (최근 5년)")
-                    ann_df = is_ann_df.merge(bs_ann_df, on='calendarYear', how='left')
-                    for col, growth_col in zip(['revenue', 'operatingIncome', 'netIncome'], ['매출성장률', '영업이익성장률', '순이익성장률']):
-                        ann_df[growth_col] = ann_df[col].shift(-1)
-                        ann_df[growth_col] = ann_df.apply(lambda row: calc_growth(row[col], row[growth_col]), axis=1)
+                # yfinance 데이터를 이용한 재무 매칭 테이블 빌드
+                if not ann_fin.empty and not ann_bs.empty:
+                    st.markdown("#### 📅 연간 주요 재무 항목")
                     
-                    ann_df = ann_df.rename(columns={'calendarYear':'연도', 'revenue':'매출액', 'operatingIncome':'영업이익', 'netIncome':'순이익', 'ebitda':'EBITDA', 'totalAssets':'총자산', 'totalLiabilities':'총부채', 'totalStockholdersEquity':'자본'})
-                    for col in ['매출액', '영업이익', '순이익', 'EBITDA', '총자산', '총부채', '자본']: ann_df[col] = ann_df[col].apply(format_currency)
-                    for col in ['매출성장률', '영업이익성장률', '순이익성장률']: ann_df[col] = ann_df[col].apply(format_growth)
-                    st.dataframe(ann_df[['연도', '매출액', '매출성장률', '영업이익', '영업이익성장률', '순이익', '순이익성장률', 'EBITDA', '총자산', '총부채', '자본']].head(5), hide_index=True, use_container_width=True)
-                else:
-                    st.info("연간 재무제표 원본 데이터를 파싱할 수 없거나 제공되지 않는 종목입니다.")
-
-                req_is_qtr = ['date', 'period', 'revenue', 'operatingIncome', 'netIncome', 'eps']
-                qtr_df = safe_parse(is_qtr_raw, req_is_qtr, 'date')
-
-                if not qtr_df.empty:
-                    st.markdown("#### 📊 분기별 재무 및 성장률 (최근 3년)")
-                    for col, growth_col in zip(['revenue', 'operatingIncome', 'netIncome'], ['매출성장률(YoY)', '영업이익성장률(YoY)', '순이익성장률(YoY)']):
-                        qtr_df[growth_col] = qtr_df[col].shift(-4)
-                        qtr_df[growth_col] = qtr_df.apply(lambda row: calc_growth(row[col], row[growth_col]), axis=1)
+                    # 인덱스 표준화 매핑 (yfinance 인덱스명 매칭 고도화)
+                    idx_map = {
+                        'Total Revenue': '매출액', 'Operating Income': '영업이익', 
+                        'Net Income': '순이익', 'EBITDA': 'EBITDA',
+                        'Total Assets': '총자산', 'Total Liabilities Net Minority Interest': '총부채',
+                        'Stockholders Equity': '총자본'
+                    }
                     
-                    qtr_df = qtr_df.rename(columns={'date':'발표일', 'period':'분기', 'revenue':'매출액', 'operatingIncome':'영업이익', 'netIncome':'순이익', 'eps':'EPS'})
-                    for col in ['매출액', '영업이익', '순이익']: qtr_df[col] = qtr_df[col].apply(format_currency)
-                    for col in ['매출성장률(YoY)', '영업이익성장률(YoY)', '순이익성장률(YoY)']: qtr_df[col] = qtr_df[col].apply(format_growth)
-                    st.dataframe(qtr_df[['발표일', '분기', '매출액', '매출성장률(YoY)', '영업이익', '영업이익성장률(YoY)', '순이익', '순이익성장률(YoY)', 'EPS']].head(12), hide_index=True, use_container_width=True)
+                    combined_rows = []
+                    # 손익계산서 데이터 추출
+                    for yf_idx, kor_name in idx_map.items():
+                        if yf_idx in ann_fin.index:
+                            row_data = ann_fin.loc[yf_idx].copy()
+                            row_data.name = kor_name
+                            combined_rows.append(row_data)
+                        elif yf_idx in ann_bs.index:
+                            row_data = ann_bs.loc[yf_idx].copy()
+                            row_data.name = kor_name
+                            combined_rows.append(row_data)
+                    
+                    if combined_rows:
+                        fin_table = pd.DataFrame(combined_rows)
+                        # 컬럼(날짜)을 보기 좋게 연도로 정렬 및 포맷팅
+                        fin_table.columns = [str(col)[:4] for col in fin_table.columns]
+                        
+                        # 금액 데이터 천단위 콤마 포맷 적용
+                        formatted_table = fin_table.applymap(format_currency_krw)
+                        st.dataframe(formatted_table, use_container_width=True)
+                    else:
+                        st.info("매칭되는 한국 표준 재무 항목을 찾을 수 없습니다.")
                 else:
-                    st.info("분기별 재무제표 원본 데이터를 파싱할 수 없거나 제공되지 않는 종목입니다.")
+                    st.info("연간 재무제표 원본 데이터를 야후 파이낸스에서 불러오지 못했습니다. 종목 기호를 확인하세요.")
+
+                if not qtr_fin.empty:
+                    st.markdown("#### 📊 분기별 주요 재무 항목")
+                    qtr_idx_map = {'Total Revenue': '매출액', 'Operating Income': '영업이익', 'Net Income': '순이익'}
+                    qtr_rows = []
+                    for yf_idx, kor_name in qtr_idx_map.items():
+                        if yf_idx in qtr_fin.index:
+                            row_data = qtr_fin.loc[yf_idx].copy()
+                            row_data.name = kor_name
+                            qtr_rows.append(row_data)
+                    if qtr_rows:
+                        qtr_table = pd.DataFrame(qtr_rows)
+                        qtr_table.columns = [str(col)[:7] for col in qtr_table.columns]
+                        st.dataframe(qtr_table.applymap(format_currency_krw), use_container_width=True)
+                else:
+                    st.info("분기별 재무 데이터가 존재하지 않습니다.")
 
             with t_biz:
-                desc_en = info.get("description", "")
-                if desc_en:
-                    st.markdown(f'<div class="overview-panel" style="margin-bottom: 20px;"><strong>[원문 개요]</strong><br><br>{desc_en}</div>', unsafe_allow_html=True)
-                    try:
-                        with st.spinner("개요 정보 번역 중..."):
-                            desc_ko = GoogleTranslator(source='en', target='ko').translate(desc_en)
-                        st.markdown(f'<div class="overview-panel"><strong>[🇰🇷 한글 번역]</strong><br><br>{desc_ko}</div>', unsafe_allow_html=True)
-                    except:
-                        pass
+                desc = info.get("longBusinessSummary", "")
+                if desc:
+                    st.markdown(f'<div class="overview-panel"><strong>[기업 요약]</strong><br><br>{desc}</div>', unsafe_allow_html=True)
                 else:
-                    st.info("해당 기업의 개요 정보가 제공되지 않습니다.")
+                    # 한국 주식의 경우 야후파이낸스 프로필 설명이 비어있는 경우가 많으므로 기본 정보 바인딩
+                    st.markdown(f"""
+                    <div class="overview-panel">
+                        <strong>[기본 정보]</strong><br><br>
+                        - 회사명: {info.get('longName', ticker)}<br>
+                        - 섹터: {info.get('sector', '정보 없음')}<br>
+                        - 산업군: {info.get('industry', '정보 없음')}<br>
+                        - 대표 웹사이트: <a href="{info.get('website', '#')}" style="color:#64ffda;">{info.get('website', '정보 없음')}</a>
+                    </div>
+                    """, unsafe_allow_html=True)
                     
         else: st.info("👈 왼쪽 리스트에서 종목을 선택해 주세요.")
 else:
