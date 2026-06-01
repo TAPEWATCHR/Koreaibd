@@ -4,3 +4,4 @@ requests
 pykrx
 st-gsheets-connection
 lxml
+beautifulsoup4
