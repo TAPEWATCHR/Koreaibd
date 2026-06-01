@@ -1,1 +1,37 @@
+name: Daily KR Stock Data Update
 
+on:
+  schedule:
+    # 매일 한국 시간(KST) 오후 4시 30분 실행 (UTC 07:30)
+    - cron: '30 7 * * *'
+  workflow_dispatch: # 필요할 때 깃허브에서 수동으로 실행 가능
+
+jobs:
+  update-data:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: 저장소 체크아웃
+      uses: actions/checkout@v3
+
+    - name: 파이썬 환경 설정
+      uses: actions/setup-python@v4
+      with:
+        python-numeric-version: '3.10'
+
+    - name: 필수 라이브러리 설치
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install lxml  # 네이버 금융 표 파싱용 추가
+
+    - name: 데이터 수집 및 계산기 실행
+      run: |
+        python kr_update_data.py
+
+    - name: 변경된 DB 파일 깃허브에 업로드
+      run: |
+        git config --global user.name "github-actions[bot]"
+        git config --global user.email "github-actions[bot]@users.noreply.github.com"
+        git add kr_ibd_system.db
+        git diff --quiet && git diff --staged --quiet || (git commit -m "📅 자동 업데이트: 국내 주식 시장 데이터 최신화" && git push)
