@@ -19,21 +19,31 @@ def clean_tv_symbol(symbol):
         return f"KRX:{base}"
     return raw
 
+# --- 💾 [데이터베이스 설정] 소문자 kr_ibd_system.db 반영 및 안정성 강화 ---
 def init_db():
-    conn = sqlite3.connect('ibd_system.db')
+    conn = sqlite3.connect('kr_ibd_system.db')
     conn.execute("CREATE TABLE IF NOT EXISTS favorites (symbol TEXT PRIMARY KEY)")
     conn.close()
 
 def get_data():
-    if not os.path.exists('ibd_system.db'): return pd.DataFrame()
-    conn = sqlite3.connect('ibd_system.db')
-    df = pd.read_sql("SELECT * FROM repo_results", conn)
-    conn.close()
+    if not os.path.exists('kr_ibd_system.db'): 
+        return pd.DataFrame()
+    
+    conn = sqlite3.connect('kr_ibd_system.db')
+    try:
+        # 테이블이 없거나 데이터가 꼬여있어도 대시보드가 죽지 않도록 예외 처리
+        df = pd.read_sql("SELECT * FROM repo_results", conn)
+    except Exception as e:
+        df = pd.DataFrame()
+    finally:
+        conn.close()
     return df
 
 def get_rs_history(ticker):
-    if not os.path.exists('ibd_system.db'): return pd.DataFrame()
-    conn = sqlite3.connect('ibd_system.db')
+    if not os.path.exists('kr_ibd_system.db'): 
+        return pd.DataFrame()
+        
+    conn = sqlite3.connect('kr_ibd_system.db')
     try:
         hist = pd.read_sql("SELECT * FROM rs_history WHERE symbol = ? ORDER BY date ASC", conn, params=(ticker,))
     except: 
@@ -41,6 +51,7 @@ def get_rs_history(ticker):
     conn.close()
     return hist
 
+# --- ☁️ [구글 시트 연동] ---
 def get_gsheet_conn():
     return st.connection("gsheets", type=GSheetsConnection)
 
@@ -81,7 +92,7 @@ def get_fin_data_naver(ticker):
         return pd.DataFrame(), pd.DataFrame(), {}, "올바른 6자리 대한민국 종목코드가 아닙니다."
     
     url = f"https://finance.naver.com/item/main.naver?code={code}"
-    # Cloud 서버 차단 방지를 위한 브라우저 유저에이전트 우회 헤더 설정
+    # Cloud 서버 차단 방지를 위한 브라우저 우회 헤더 설정
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
     }
@@ -106,7 +117,7 @@ def get_fin_data_naver(ticker):
         # 재무 지표 항목명을 인덱스로 배치
         fin_df = fin_df.set_index(fin_df.columns[0])
         
-        # 멀티인덱스 여부에 따른 연간/분기 컬럼 슬라이싱 분기 처리 (Resilience 보장)
+        # 멀티인덱스 여부에 따른 연간/분기 컬럼 슬라이싱 분기 처리
         if isinstance(fin_df.columns, pd.MultiIndex):
             annual_cols = [col for col in fin_df.columns if '연간' in str(col[0])]
             quarter_cols = [col for col in fin_df.columns if '분기' in str(col[0])]
@@ -269,7 +280,7 @@ if not df.empty:
                 if st.button("★ 관심해제" if is_fav else "☆ 관심저장", use_container_width=True):
                     if toggle_favorite_gsheet(ticker): st.rerun()
             
-            # 네이버 금융에서 깨끗한 원화 재무제표 로드
+            # 네이버 금융에서 원화 재무제표 로드
             ann_fin, qtr_fin, info, naver_error = get_fin_data_naver(ticker)
             t_chart, t_check, t_fin, t_biz = st.tabs(["📊 차트", "🛡️ 체크리스트", "🧾 재무제표", "🏢 기업 개요"])
             
@@ -354,4 +365,4 @@ if not df.empty:
                     
         else: st.info("👈 왼쪽 리스트에서 종목을 선택해 주세요.")
 else:
-    st.warning("데이터베이스가 비어있습니다. 먼저 `update_data.py`를 실행해주세요.")
+    st.warning("데이터베이스가 비어있습니다. 먼저 `update_data.py`를 실행해서 데이터를 채우고 깃허브에 push 해주세요.")
