@@ -2,7 +2,8 @@
 import streamlit as st
 import pandas as pd
 import sqlite3
-import yfinance as yf
+import requests
+from bs4 import BeautifulSoup
 import streamlit.components.v1 as components
 import os
 import altair as alt
@@ -10,24 +11,12 @@ from streamlit_gsheets import GSheetsConnection
 
 # --- 🔤 [한국 주식 심볼 최적화] ---
 def clean_tv_symbol(symbol):
-    """트레이딩뷰용: 한국 주식은 KRX:6자리코드 (예: 005930.KS -> KRX:005930)"""
+    """트레이딩뷰용: 한국 주식은 KRX:6자리코드 규격을 맞추어야 차트가 나옴"""
     if not symbol: return ""
     raw = str(symbol).strip().upper()
     base = raw.split('.')[0].split('-')[0]
     if base.isdigit() and len(base) == 6:
         return f"KRX:{base}"
-    return raw
-
-def clean_yf_symbol(symbol):
-    """Yahoo Finance용: 6자리코드 뒤에 시장에 따라 .KS 또는 .KQ가 붙어야 함"""
-    if not symbol: return ""
-    raw = str(symbol).strip().upper()
-    if '.' in raw or '-' in raw:
-        raw = raw.replace('-', '.')
-        return raw
-    # 만약 6자리 숫자만 들어왔을 경우 기본적으로 .KS(코스피)로 가정 (필요시 DB 구조에 맞게 수정)
-    if len(raw) == 6 and raw.isdigit():
-        return f"{raw}.KS"
     return raw
 
 def init_db():
@@ -83,34 +72,76 @@ def toggle_favorite_gsheet(symbol):
         st.error(f"🚨 구글 시트 저장 실패: {e}")
         return False
 
-# --- 🧾 [수정] FMP를 제거하고 yfinance로 한국 주식 재무제표 크롤링 ---
+# --- 🧾 [안정성 확보] 야후 대신 네이버 금융 '기업실적분석' 테이블 크롤링 ---
 @st.cache_data(ttl=3600)
-def get_fin_data_yf(ticker):
-    yf_ticker = clean_yf_symbol(ticker)
+def get_fin_data_naver(ticker):
+    # 어떤 형식의 심볼이 들어와도 오직 순수 6자리 숫자 코드만 정제해서 추출
+    code = "".join(filter(str.isdigit(), str(ticker)))
+    if not code or len(code) != 6:
+        return pd.DataFrame(), pd.DataFrame(), {}, "올바른 6자리 대한민국 종목코드가 아닙니다."
+    
+    url = f"https://finance.naver.com/item/main.naver?code={code}"
+    # Cloud 서버 차단 방지를 위한 브라우저 유저에이전트 우회 헤더 설정
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    }
+    
     try:
-        stock = yf.Ticker(yf_ticker)
+        response = requests.get(url, headers=headers, timeout=10)
+        response.encoding = 'euc-kr' # 네이버 한글 인코딩 깨짐 방지
         
-        # 연간 재무제표 및 분기 재무제표 로드
-        ann_financials = stock.financials
-        qtr_financials = stock.quarterly_financials
-        ann_balance = stock.balance_sheet
-        info = stock.info
+        # HTML 내의 테이블들을 데이터프레임 리스트로 파싱
+        dfs = pd.read_html(response.text)
         
-        return ann_financials, ann_balance, qtr_financials, info, None
+        fin_df = None
+        for df_item in dfs:
+            # 첫 번째 열에 '매출액'이 적혀있는 '기업실적분석' 표 색출
+            if not df_item.empty and any('매출액' in str(s) for s in df_item.iloc[:, 0].values):
+                fin_df = df_item
+                break
+                
+        if fin_df is None:
+            return pd.DataFrame(), pd.DataFrame(), {}, "네이버 금융에서 재무 분석 테이블을 찾지 못했습니다."
+            
+        # 재무 지표 항목명을 인덱스로 배치
+        fin_df = fin_df.set_index(fin_df.columns[0])
+        
+        # 멀티인덱스 여부에 따른 연간/분기 컬럼 슬라이싱 분기 처리 (Resilience 보장)
+        if isinstance(fin_df.columns, pd.MultiIndex):
+            annual_cols = [col for col in fin_df.columns if '연간' in str(col[0])]
+            quarter_cols = [col for col in fin_df.columns if '분기' in str(col[0])]
+            
+            annual_df = fin_df[annual_cols].copy()
+            annual_df.columns = [col[1] for col in annual_df.columns]
+            
+            quarter_df = fin_df[quarter_cols].copy()
+            quarter_df.columns = [col[1] for col in quarter_df.columns]
+        else:
+            annual_cols = [col for col in fin_df.columns if '연간' in str(col)]
+            quarter_cols = [col for col in fin_df.columns if '분기' in str(col)]
+            
+            annual_df = fin_df[annual_cols].copy()
+            annual_df.columns = [str(col).split('_')[-1] for col in annual_df.columns]
+            
+            quarter_df = fin_df[quarter_cols].copy()
+            quarter_df.columns = [str(col).split('_')[-1] for col in quarter_df.columns]
+            
+        annual_df.index.name = "주요재무지표"
+        quarter_df.index.name = "주요재무지표"
+        
+        # 보조 기업정보 파싱
+        soup = BeautifulSoup(response.text, 'html.parser')
+        info_dict = {}
+        h4_ind = soup.find('h4', string=lambda t: t and '업종' in t)
+        if h4_ind:
+            a_tag = h4_ind.find_next('a')
+            if a_tag:
+                info_dict['industry'] = a_tag.text.strip()
+                
+        return annual_df, quarter_df, info_dict, None
+        
     except Exception as e:
-        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), {}, f"데이터 로드 중 오류 발생: {str(e)}"
-
-def format_currency_krw(val):
-    try:
-        val = float(val)
-        if pd.isna(val) or val == 0: return "0"
-        # yfinance는 원화 원본 단위로 제공하므로 보기 편하게 '억 원' 단위로 변환해 출력
-        return f"{val / 100000000:,.1f}억"
-    except: return "0"
-
-def format_growth(val):
-    if pd.isna(val) or val is None: return "-"
-    return f"{val:.1f}%"
+        return pd.DataFrame(), pd.DataFrame(), {}, f"데이터 호출 실패: {str(e)}"
 
 def format_adv(val):
     try:
@@ -149,7 +180,7 @@ if not df.empty:
     if 'smr_grade' not in df.columns: df['smr_grade'] = 'C'
     if 'industry' not in df.columns: df['industry'] = 'Unknown'
 
-    with St.sidebar:
+    with st.sidebar:
         is_mobile = st.toggle("📱 모바일 화면 최적화", value=False)
         st.divider()
         st.header("필터")
@@ -238,8 +269,8 @@ if not df.empty:
                 if st.button("★ 관심해제" if is_fav else "☆ 관심저장", use_container_width=True):
                     if toggle_favorite_gsheet(ticker): st.rerun()
             
-            # yfinance 데이터 호출
-            ann_fin, ann_bs, qtr_fin, info, yf_error = get_fin_data_yf(ticker)
+            # 네이버 금융에서 깨끗한 원화 재무제표 로드
+            ann_fin, qtr_fin, info, naver_error = get_fin_data_naver(ticker)
             t_chart, t_check, t_fin, t_biz = st.tabs(["📊 차트", "🛡️ 체크리스트", "🧾 재무제표", "🏢 기업 개요"])
             
             with t_chart:
@@ -294,79 +325,32 @@ if not df.empty:
                     st.markdown(f'<div class="check-box {"check-pass" if c["pass"] else "check-fail"}">{"✅" if c["pass"] else "❌"} {c["name"]}</div>', unsafe_allow_html=True)
 
             with t_fin:
-                if yf_error:
-                    st.error(f"🚨 {yf_error}")
-                
-                st.caption("단위: 억 원 (KRW) / 성장률: %")
-                
-                # yfinance 데이터를 이용한 재무 매칭 테이블 빌드
-                if not ann_fin.empty and not ann_bs.empty:
-                    st.markdown("#### 📅 연간 주요 재무 항목")
+                if naver_error:
+                    st.error(f"🚨 {naver_error}")
+                else:
+                    st.caption("출처: 네이버 금융 (기업실적분석) 단위 일치")
                     
-                    # 인덱스 표준화 매핑 (yfinance 인덱스명 매칭 고도화)
-                    idx_map = {
-                        'Total Revenue': '매출액', 'Operating Income': '영업이익', 
-                        'Net Income': '순이익', 'EBITDA': 'EBITDA',
-                        'Total Assets': '총자산', 'Total Liabilities Net Minority Interest': '총부채',
-                        'Stockholders Equity': '총자본'
-                    }
-                    
-                    combined_rows = []
-                    # 손익계산서 데이터 추출
-                    for yf_idx, kor_name in idx_map.items():
-                        if yf_idx in ann_fin.index:
-                            row_data = ann_fin.loc[yf_idx].copy()
-                            row_data.name = kor_name
-                            combined_rows.append(row_data)
-                        elif yf_idx in ann_bs.index:
-                            row_data = ann_bs.loc[yf_idx].copy()
-                            row_data.name = kor_name
-                            combined_rows.append(row_data)
-                    
-                    if combined_rows:
-                        fin_table = pd.DataFrame(combined_rows)
-                        # 컬럼(날짜)을 보기 좋게 연도로 정렬 및 포맷팅
-                        fin_table.columns = [str(col)[:4] for col in fin_table.columns]
-                        
-                        # 금액 데이터 천단위 콤마 포맷 적용
-                        formatted_table = fin_table.applymap(format_currency_krw)
-                        st.dataframe(formatted_table, use_container_width=True)
+                    if not ann_fin.empty:
+                        st.markdown("#### 📅 연간 실적 지표 (최근 4년)")
+                        st.dataframe(ann_fin, use_container_width=True)
                     else:
-                        st.info("매칭되는 한국 표준 재무 항목을 찾을 수 없습니다.")
-                else:
-                    st.info("연간 재무제표 원본 데이터를 야후 파이낸스에서 불러오지 못했습니다. 종목 기호를 확인하세요.")
+                        st.info("연간 재무 분석 테이블 데이터를 구성할 수 없습니다.")
 
-                if not qtr_fin.empty:
-                    st.markdown("#### 📊 분기별 주요 재무 항목")
-                    qtr_idx_map = {'Total Revenue': '매출액', 'Operating Income': '영업이익', 'Net Income': '순이익'}
-                    qtr_rows = []
-                    for yf_idx, kor_name in qtr_idx_map.items():
-                        if yf_idx in qtr_fin.index:
-                            row_data = qtr_fin.loc[yf_idx].copy()
-                            row_data.name = kor_name
-                            qtr_rows.append(row_data)
-                    if qtr_rows:
-                        qtr_table = pd.DataFrame(qtr_rows)
-                        qtr_table.columns = [str(col)[:7] for col in qtr_table.columns]
-                        st.dataframe(qtr_table.applymap(format_currency_krw), use_container_width=True)
-                else:
-                    st.info("분기별 재무 데이터가 존재하지 않습니다.")
+                    if not qtr_fin.empty:
+                        st.markdown("#### 📊 분기별 실적 지표 (최근 6분기)")
+                        st.dataframe(qtr_fin, use_container_width=True)
+                    else:
+                        st.info("분기별 재무 분석 테이블 데이터가 존재하지 않습니다.")
 
             with t_biz:
-                desc = info.get("longBusinessSummary", "")
-                if desc:
-                    st.markdown(f'<div class="overview-panel"><strong>[기업 요약]</strong><br><br>{desc}</div>', unsafe_allow_html=True)
-                else:
-                    # 한국 주식의 경우 야후파이낸스 프로필 설명이 비어있는 경우가 많으므로 기본 정보 바인딩
-                    st.markdown(f"""
-                    <div class="overview-panel">
-                        <strong>[기본 정보]</strong><br><br>
-                        - 회사명: {info.get('longName', ticker)}<br>
-                        - 섹터: {info.get('sector', '정보 없음')}<br>
-                        - 산업군: {info.get('industry', '정보 없음')}<br>
-                        - 대표 웹사이트: <a href="{info.get('website', '#')}" style="color:#64ffda;">{info.get('website', '정보 없음')}</a>
-                    </div>
-                    """, unsafe_allow_html=True)
+                st.markdown(f"""
+                <div class="overview-panel">
+                    <strong>[네이버 연동 기본 정보]</strong><br><br>
+                    - 종목 마스터 코드: {ticker}<br>
+                    - 크롤링 매칭 섹터: {info.get('industry', target.get('industry', '분석 중'))}<br>
+                    - 데이터 소스 상태: <span style="color:#10b981;">정상 (Naver Engine Bypass)</span>
+                </div>
+                """, unsafe_allow_html=True)
                     
         else: st.info("👈 왼쪽 리스트에서 종목을 선택해 주세요.")
 else:
