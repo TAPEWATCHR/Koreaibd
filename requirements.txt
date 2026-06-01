@@ -1,7 +1,8 @@
 streamlit
 pandas
 requests
-pykrx
-st-gsheets-connection
-lxml
 beautifulsoup4
+deep_translator
+streamlit-gsheets-connection
+altair
+lxml
