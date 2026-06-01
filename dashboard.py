@@ -86,8 +86,9 @@ def toggle_favorite_gsheet(symbol):
 # --- 🧾 [안정성 확보] 야후 대신 네이버 금융 '기업실적분석' 테이블 크롤링 ---
 @st.cache_data(ttl=3600)
 def get_fin_data_naver(ticker):
-    # 어떤 형식의 심볼이 들어와도 오직 순수 6자리 숫자 코드만 정제해서 추출
-    code = "".join(filter(str.isdigit(), str(ticker)))
+    # [수정 완료] TypeError를 유발하던 괄호 분쟁이 없는 안전한 방식으로 변경
+    code = "".join([c for c in str(ticker) if c.isdigit()])
+    
     if not code or len(code) != 6:
         return pd.DataFrame(), pd.DataFrame(), {}, "올바른 6자리 대한민국 종목코드가 아닙니다."
     
