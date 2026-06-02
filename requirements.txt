@@ -1,9 +1,6 @@
 streamlit
 pandas
 numpy
-requests
-beautifulsoup4
 plotly
-FinanceDataReader
-OpenDartReader
-st-gsheets-connection
+finance-datareader
+opendartreader
