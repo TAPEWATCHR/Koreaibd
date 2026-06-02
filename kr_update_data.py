@@ -1,196 +1,230 @@
 # -*- coding: utf-8 -*-
-import sqlite3
+import FinanceDataReader as fdr
+import OpenDartReader
 import pandas as pd
 import numpy as np
-import requests
-from bs4 import BeautifulSoup
-import xml.etree.ElementTree as ET
-from datetime import datetime
+import sqlite3
+import datetime
+import time
+import os
 
-def init_db():
-    conn = sqlite3.connect('kr_ibd_system.db')
+# ==============================================================================
+# [사용자 필수 변경 항목] 발급받으신 DART API 키를 여기에 입력하세요.
+# ==============================================================================
+DART_API_KEY = "74338fa9ee91fca6545b4bc7caec0c71d581e84b" 
+DB_NAME = "kr_ibd_system.db"
+
+def init_database():
+    conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
+    # 주도주 기술적 연산 결과 테이블
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS repo_results (
-            symbol TEXT PRIMARY KEY, price INTEGER, rs_score INTEGER,
-            industry_rs_score INTEGER, smr_grade TEXT, ad_grade TEXT, adv_50 REAL, industry TEXT
+            symbol TEXT PRIMARY KEY,
+            name TEXT,
+            price REAL,
+            rs_score INTEGER,
+            industry_rs_score INTEGER,
+            smr_grade TEXT,
+            ad_grade TEXT,
+            adv_50 REAL,
+            industry TEXT
         )
     """)
+    # 차트용 역사적 RS 점수 기록 테이블
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS rs_history (
-            symbol TEXT, date TEXT, rs_score INTEGER, industry_rs_score INTEGER,
+            symbol TEXT,
+            date TEXT,
+            rs_score INTEGER,
+            industry_rs_score INTEGER,
             PRIMARY KEY (symbol, date)
         )
     """)
+    # DART 기반 FMP 스타일 재무제표 테이블
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS dart_financials (
+            symbol TEXT,
+            period_type TEXT, -- 'ANNUAL' 또는 'QUARTER'
+            period_name TEXT, -- 예: '2025', '2025 1Q'
+            revenue REAL,
+            operating_income REAL,
+            net_income REAL,
+            current_assets REAL,
+            total_liabilities REAL,
+            PRIMARY KEY (symbol, period_type, period_name)
+        )
+    """)
     conn.commit()
     conn.close()
 
-def fetch_market_leaders():
-    """네이버 금융 시가총액 상위 페이지에서 주도주 후보군(코스피/코스닥 상위 각 250종목) 추출"""
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, Gecko) Chrome/120.0.0.0 Safari/537.36'}
-    candidate_stocks = []
+def calculate_technical_metrics():
+    print("🚀 [1/4] 한국거래소 상장 종목 및 세부 섹터 정보 수집 중...")
+    # 코스피, 코스닥 전체 시장 목록 및 업종(Sector) 데이터 추출
+    df_krx = fdr.StockListing('KRX')
+    df_krx = df_krx[df_krx['Market'].isin(['KOSPI', 'KOSDAQ'])].copy()
+    df_krx = df_krx.dropna(subset=['Sector']) # 세부 섹터 정보가 없는 종목 제외
     
-    for sosok in [0, 1]:
-        market_label = "KOSPI" if sosok == 0 else "KOSDAQ"
-        for page in range(1, 6):
-            url = f"https://finance.naver.com/sise/sise_market_sum.naver?sosok={sosok}&page={page}&field=per&field=roe"
-            try:
-                res = requests.get(url, headers=headers, timeout=10)
-                soup = BeautifulSoup(res.text, 'html.parser')
-                table = soup.find('table', {'class': 'type_2'})
-                if not table: continue
+    print(f"총 {len(df_krx)}개 종목의 기술적 지표 연산을 시작합니다.")
+    
+    today = datetime.date.today()
+    start_date = today - datetime.timedelta(days=450) # 200일선 및 1년치 수익률 확보용 계산 범위
+    
+    results = []
+    today_str = today.strftime('%Y-%m-%d')
+    
+    # 계산 가속화를 위해 룹 돌며 연산 실행
+    for idx, row in df_krx.iterrows():
+        ticker = row['Symbol']
+        name = row['CodeName'] if 'CodeName' in row else row['Name']
+        sector = row['Sector']
+        
+        try:
+            df_hist = fdr.DataReader(ticker, start=start_date, end=today)
+            if len(df_hist) < 240: # 최소 거래일수 미달 종목 패스
+                continue
                 
-                th_tags = table.find_all('th')
-                col_map = {th.text.strip(): idx for idx, th in enumerate(th_tags)}
-                
-                for tr in table.find_all('tr'):
-                    a_tag = tr.find('a', {'class': 'tltle'})
-                    if not a_tag: continue
-                    tds = tr.find_all('td')
-                    if len(tds) < len(col_map): continue
-                    
-                    name = a_tag.text.strip()
-                    if "스팩" in name or name.endswith("우") or name.endswith("우B"): continue
-                    
-                    ticker = a_tag['href'].split('code=')[-1].strip()
-                    price = int(tds[col_map['현재가']].text.replace(',', '').strip())
-                    
-                    per_txt = tds[col_map['PER']].text.replace(',', '').strip()
-                    roe_txt = tds[col_map['ROE']].text.replace(',', '').strip()
-                    per = float(per_txt) if per_txt and per_txt != 'N/A' else 0.0
-                    roe = float(roe_txt) if roe_txt and roe_txt != 'N/A' else 0.0
-                    
-                    candidate_stocks.append({
-                        'ticker': ticker, 'name': name, 'price': price,
-                        'per': per, 'roe': roe, 'industry': market_label
-                    })
-            except Exception as e:
-                print(f"⚠️ 네이버 페이지 수집 중 오류 발생 ({market_label} P.{page}): {e}")
-                
-    return candidate_stocks
-
-def analyze_stock_history(ticker, debug=False):
-    """네이버 차트 엔진에서 1년치 일별 데이터를 가져와 RS 및 AD 메트릭 연산"""
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8'
-    }
-    url = f"https://fchart.stock.naver.com/sise.nhn?symbol={ticker}&timeframe=day&count=260&requestType=0"
-    try:
-        res = requests.get(url, headers=headers, timeout=10)
-        if res.status_code != 200:
-            if debug: print(f"   ↳ [디버그] {ticker} HTTP 에러 코드: {res.status_code}")
-            return None
+            close = df_hist['Close']
+            volume = df_hist['Volume']
             
-        # 🌟 [인코딩 에러 핵심 해결부] 
-        # 1. 바이너리 데이터를 EUC-KR로 명시적 디코딩하여 파이썬 표준 문자열로 변환
-        xml_text = res.content.decode('euc-kr', errors='ignore')
-        
-        # 2. 파서가 거부감을 느끼는 구식 머리말(<?xml ... ?>) 강제 제거
-        if xml_text.strip().startswith('<?xml'):
-            xml_text = xml_text.split('?>', 1)[1].strip()
+            current_price = float(close.iloc[-1])
             
-        if not xml_text or "item" not in xml_text:
-            if debug: print(f"   ↳ [디버그] {ticker} 응답 데이터가 올바르지 않음")
-            return None
+            # --- [요청 사항 4] 가중 RS 점수 산식 구현 ---
+            # 1개월(20거래일), 3개월(60거래일), 6개월(120거래일), 12개월(240거래일) 전 종가 기준 수익률 계산
+            ret_1m = (current_price / close.iloc[-20]) - 1 if len(close) >= 20 else 0
+            ret_3m = (current_price / close.iloc[-60]) - 1 if len(close) >= 60 else 0
+            ret_6m = (current_price / close.iloc[-120]) - 1 if len(close) >= 120 else 0
+            ret_12m = (current_price / close.iloc[-240]) - 1 if len(close) >= 240 else 0
+            
+            # 지정된 가중치 적용 (1m 35%, 3m 25%, 6m 20%, 12m 20%)
+            weighted_momentum = (ret_1m * 0.35) + (ret_3m * 0.25) + (ret_6m * 0.20) + (ret_12m * 0.20)
+            
+            # --- [요청 사항 4] AD 등급 산식 고도화 ---
+            # 50일 평균 거래량 계산
+            vol_avg50 = volume.rolling(50).mean()
+            df_ad = pd.DataFrame({'Close': close, 'Volume': volume, 'AvgVol': vol_avg50}).tail(50)
+            df_ad['PrevClose'] = df_ad['Close'].shift(1)
+            df_ad = df_ad.dropna()
+            
+            # 50일 평균 거래량보다 낮은 거래량은 철저히 무시 (순수 기관 자금만 필터링)
+            df_ad['ExcessVol'] = df_ad['Volume'] - df_ad['AvgVol']
+            df_ad.loc[df_ad['ExcessVol'] < 0, 'ExcessVol'] = 0
+            
+            # 초과 거래량이 터진 날의 상승/하락 누적 연산
+            accum_vol = df_ad[(df_ad['Close'] > df_ad['PrevClose'])]['ExcessVol'].sum()
+            dist_vol = df_ad[(df_ad['Close'] < df_ad['PrevClose'])]['ExcessVol'].sum()
+            
+            ad_ratio = accum_vol / (accum_vol + dist_vol + 1e-5)
+            adv_50_val = float(vol_avg50.iloc[-1] * current_price) # 대금 환산용 기준값
+            
+            results.append({
+                'symbol': ticker, 'name': name, 'price': current_price,
+                'raw_momentum': weighted_momentum, 'ad_ratio': ad_ratio,
+                'adv_50': adv_50_val, 'industry': sector
+            })
+        except:
+            continue
 
-        # 3. 깨끗해진 순수 XML 문자열을 파싱
-        root = ET.fromstring(xml_text)
-        items = root.findall('.//item')
-        
-        prices = []
-        volumes = []
-        for item in items:
-            data = item.get('data').split('|')
-            if len(data) >= 6:
-                prices.append(int(data[4]))  # 종가
-                volumes.append(int(data[5])) # 거래량
-                
-        if len(prices) < 50: 
-            if debug: print(f"   ↳ [디버그] {ticker} 데이터 일수 부족 ({len(prices)}일)")
-            return None
-        
-        # 1. 1년 주가 수익률
-        one_year_return = (prices[-1] - prices[0]) / prices[0] if prices[0] > 0 else 0
-        
-        # 2. 50일 평균 거래대금
-        recent_prices = prices[-50:]
-        recent_volumes = volumes[-50:]
-        adv_50 = np.mean([p * v for p, v in zip(recent_prices, recent_volumes)])
-        
-        # 3. 기관 매집(AD 수급 등급)
-        vol_avg_20 = np.mean(volumes[-20:])
-        accum_days = 0
-        for i in range(-20, 0):
-            if prices[i] > prices[i-1] and volumes[i] > vol_avg_20:
-                accum_days += 1
-                
-        if accum_days >= 7: ad_grade = 'A'
-        elif accum_days >= 5: ad_grade = 'B'
-        elif accum_days >= 3: ad_grade = 'C'
-        elif accum_days >= 1: ad_grade = 'D'
-        else: ad_grade = 'E'
-        
-        return {"return": one_year_return, "adv_50": adv_50, "ad_grade": ad_grade}
-    except Exception as e:
-        if debug: print(f"   ↳ [디버그] {ticker} 예외 발생: {e}")
-        return None
+    if not results:
+        print("🚨 연산 가능한 종목 데이터가 존재하지 않습니다.")
+        return pd.DataFrame()
 
-def update_kr_data():
-    init_db()
-    today = datetime.today().strftime('%Y%m%d')
-    print(f"🌐 [클라우드 바이패스 모드] 네이버 인텔리전스 수집 시작 (기준일: {today})")
+    df_res = pd.DataFrame(results)
     
-    base_stocks = fetch_market_leaders()
-    print(f"🎯 1차 스크리닝 후보군 총 {len(base_stocks)}개 종목 확보 완료.")
+    # 전체 시장 내 백분위 순위로 RS 점수 매김 (1 ~ 99)
+    df_res['rs_score'] = pd.qcut(df_res['raw_momentum'].rank(method='first'), 99, labels=False) + 1
     
-    valid_results = []
-    print("⏳ 종목별 상세 시계열 데이터 분석 중...")
-    for idx, s in enumerate(base_stocks):
-        debug_mode = True if idx < 3 else False
-        hist_metrics = analyze_stock_history(s['ticker'], debug=debug_mode)
-        if not hist_metrics: continue
-        
-        roe = s['roe']
-        if roe >= 15: smr_grade = 'A'
-        elif roe >= 10: smr_grade = 'B'
-        elif roe >= 5: smr_grade = 'C'
-        elif roe >= 0: smr_grade = 'D'
-        else: smr_grade = 'E'
-        
-        s.update(hist_metrics)
-        s['smr_grade'] = smr_grade
-        valid_results.append(s)
-        
-    if not valid_results:
-        print("🚨 유효한 데이터를 정제하지 못했습니다. 모든 종목 분석에 실패했습니다.")
+    # AD 비율에 따른 5단계 상대평가 등급 배정 (상위 20% A ~ 하락 최하위 E)
+    ad_labels = ['E', 'D', 'C', 'B', 'A']
+    df_res['ad_grade'] = pd.qcut(df_res['ad_ratio'].rank(method='first'), 5, labels=ad_labels)
+    
+    # --- [요청 사항 3] 세부 섹터 기반의 산업군 RS 점수 재계산 ---
+    industry_means = df_res.groupby('industry')['rs_score'].transform('mean')
+    df_res['industry_rs_score'] = pd.qcut(industry_means.rank(method='first'), 99, labels=False) + 1
+    
+    # SMR 등급 임시 기본값 매핑 (추후 DART 재무 연동 시 고도화 가속)
+    df_res['smr_grade'] = 'C'
+    
+    # 정산된 기술 데이터 수치를 로컬 DB에 반영 및 역사적 히스토리 축적
+    conn = sqlite3.connect(DB_NAME)
+    df_res[['symbol', 'name', 'price', 'rs_score', 'industry_rs_score', 'smr_grade', 'ad_grade', 'adv_50', 'industry']].to_sql('repo_results', conn, if_exists='replace', index=False)
+    
+    for _, r in df_res.iterrows():
+        try:
+            conn.execute("INSERT OR REPLACE INTO rs_history (symbol, date, rs_score, industry_rs_score) VALUES (?, ?, ?, ?)",
+                         (r['symbol'], today_str, int(r['rs_score']), int(r['industry_rs_score'])))
+        except:
+            pass
+    conn.commit()
+    conn.close()
+    print("✅ [2/4] 기술적 모멘텀 및 가중 섹터 RS 연산 DB 저장 완료.")
+    return df_res
+
+def update_dart_financials(df_res):
+    print("🚀 [3/4] DART 공시 데이터 추출 및 표준 명칭 계정 일치화 작업 시작...")
+    if df_res.empty or DART_API_KEY == "YOUR_ACTUAL_DART_API_KEY":
+        print("⚠️ DART 인증키가 설정되지 않았거나 데이터가 없어 재무 업데이트를 건너뜁니다.")
         return
         
-    print(f"📊 {len(valid_results)}개 종목 분석 성공. RS 스코어 계산 및 DB 저장 시작...")
-    df_final = pd.DataFrame(valid_results)
-    df_final['rs_score'] = pd.qcut(df_final['return'].rank(method='first'), 99, labels=False) + 1
+    dart = OpenDartReader(DART_API_KEY)
+    # 효율적인 호출 제어를 위해 연산 결과 중 상위 RS 스코어 주도주 150개만 타겟 압축 수행
+    target_stocks = df_res.sort_values('rs_score', ascending=False).head(150)['symbol'].tolist()
     
-    final_rows = []
-    history_rows = []
-    for _, row in df_final.iterrows():
-        full_symbol = f"{row['ticker']} ({row['name']})"
-        rs = int(row['rs_score'])
-        
-        final_rows.append((
-            full_symbol, int(row['price']), rs, int(rs * 0.96),
-            row['smr_grade'], row['ad_grade'], float(row['adv_50']), row['industry']
-        ))
-        history_rows.append((full_symbol, today, rs, int(rs * 0.96)))
-        
-    conn = sqlite3.connect('kr_ibd_system.db')
-    cursor = conn.cursor()
-    cursor.execute("DELETE FROM repo_results")
-    cursor.executemany("INSERT OR REPLACE INTO repo_results VALUES (?, ?, ?, ?, ?, ?, ?, ?)", final_rows)
-    cursor.executemany("INSERT OR REPLACE INTO rs_history VALUES (?, ?, ?, ?)", history_rows)
-    conn.commit()
+    current_year = datetime.date.today().year
+    target_years = [str(current_year - 1), str(current_year - 2)]
+    
+    # DART 계정과목 Taxonomy 표준화 매핑 사전 (FMP 표준 형식 스키마 준수)
+    account_mapping = {
+        'ifrs-full_Revenue': 'revenue',
+        'ifrs-full_OperatingIncomeLoss': 'operating_income',
+        'ifrs-full_ProfitLoss': 'net_income',
+        'ifrs-full_CurrentAssets': 'current_assets',
+        'ifrs-full_TotalLiabilities': 'total_liabilities',
+        'ifrs-full_Liabilities': 'total_liabilities'
+    }
+    
+    conn = sqlite3.connect(DB_NAME)
+    
+    for ticker in target_stocks:
+        time.sleep(0.15) # 오픈다트 서버 트래픽 차단 제한 방지용 딜레이
+        for y in target_years:
+            # 1분기(11013), 반기(11012), 3분기(11014), 사업보고서(11011) 순차 수집
+            for q_code, q_name in [('11011', 'ANNUAL'), ('11013', '1Q'), ('11012', '2Q'), ('11014', '3Q')]:
+                try:
+                    df_fin = dart.finstate_all(ticker, y, repr_t_code='OFS', bsns_year=q_code)
+                    if df_fin is None or df_fin.empty:
+                        continue
+                        
+                    # 필수 항목만 정밀 필터링 후 가공
+                    df_filtered = df_fin[df_fin['account_id'].isin(account_mapping.keys())].copy()
+                    if df_filtered.empty:
+                        continue
+                        
+                    df_filtered['std_key'] = df_filtered['account_id'].map(account_mapping)
+                    df_filtered['amt'] = pd.to_numeric(df_filtered['thstrm_amount'].str.replace(',', ''), errors='coerce').fillna(0)
+                    
+                    fin_dict = df_filtered.set_index('std_key')['amt'].to_dict()
+                    
+                    period_type = 'ANNUAL' if q_name == 'ANNUAL' else 'QUARTER'
+                    period_label = f"{y} 연간" if q_name == 'ANNUAL' else f"{y} {q_name}"
+                    
+                    conn.execute("""
+                        INSERT OR REPLACE INTO dart_financials 
+                        (symbol, period_type, period_name, revenue, operating_income, net_income, current_assets, total_liabilities)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """, (
+                        ticker, period_type, period_label,
+                        fin_dict.get('revenue', 0), fin_dict.get('operating_income', 0),
+                        fin_dict.get('net_income', 0), fin_dict.get('current_assets', 0),
+                        fin_dict.get('total_liabilities', 0)
+                    ))
+                except:
+                    continue
+        conn.commit()
     conn.close()
-    
-    print(f"🎉 성공! 차단벽을 뚫고 {len(final_rows)}개 주도주의 최종 DB 갱신을 완료했습니다.")
+    print("✅ [4/4] DART 데이터 일치화 수집 및 로컬 기지 데이터베이스 동기화 완료.")
 
 if __name__ == "__main__":
-    update_kr_data()
+    init_database()
+    df_metrics = calculate_technical_metrics()
+    update_dart_financials(df_metrics)
