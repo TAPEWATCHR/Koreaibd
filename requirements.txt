@@ -1,7 +1,9 @@
 streamlit
 pandas
+numpy
 requests
 beautifulsoup4
-lxml
+plotly
+FinanceDataReader
+OpenDartReader
 st-gsheets-connection
-altair
