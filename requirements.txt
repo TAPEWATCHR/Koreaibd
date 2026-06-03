@@ -4,3 +4,4 @@ numpy
 plotly
 finance-datareader
 opendartreader
+st-gsheets-connection
