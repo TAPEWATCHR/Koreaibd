@@ -1,7 +1,9 @@
 streamlit
 pandas
 numpy
-plotly
+altair
 finance-datareader
 opendartreader
-st-gsheets-connection
+requests
+lxml
+html5lib
