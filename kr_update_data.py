@@ -8,7 +8,6 @@ import time
 import os
 import requests
 import io
-
 from kr_financials import (
     DB_NAME,
     get_dart_api_key,
@@ -26,13 +25,14 @@ DART_API_KEY = os.environ.get(
     "DART_API_KEY",
     "74338fa9ee91fca6545b4bc7caec0c71d581e84b",
 )
+
 if DART_API_KEY and DART_API_KEY != "YOUR_ACTUAL_DART_API_KEY":
     os.environ.setdefault("DART_API_KEY", DART_API_KEY)
-
 
 def init_database():
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
+
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS repo_results (
             symbol TEXT PRIMARY KEY,
@@ -46,6 +46,7 @@ def init_database():
             industry TEXT
         )
     """)
+
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS rs_history (
             symbol TEXT,
@@ -55,15 +56,15 @@ def init_database():
             PRIMARY KEY (symbol, date)
         )
     """)
+
     init_financials_table(conn)
     conn.commit()
     conn.close()
 
-
 def calculate_technical_metrics():
-    print("🚀 [1/4] 한국거래소 상장 종목 및 세부 섹터 정보 수집 중...")
-
+    print(" 🚀  [1/4] 한국거래소 상장 종목 및 세부 섹터 정보 수집 중...")
     df_krx = fdr.StockListing("KRX")
+    
     t_col = "Code" if "Code" in df_krx.columns else "Symbol"
     n_col = "Name" if "Name" in df_krx.columns else "CodeName"
 
@@ -76,9 +77,9 @@ def calculate_technical_metrics():
         df_kind["종목코드"] = df_kind["종목코드"].astype(str).str.zfill(6)
         sector_map = df_kind.set_index("종목코드")["업종"].to_dict()
         df_krx["Sector"] = df_krx[t_col].astype(str).str.zfill(6).map(sector_map)
-        print(f"   ✅ KIND 업종 매핑 완료 (샘플: {df_krx['Sector'].notna().sum()}개)")
+        print(f"    ✅  KIND 업종 매핑 완료 (샘플: {df_krx['Sector'].notna().sum()}개)")
     except Exception as e:
-        print(f"⚠️ KIND 업종 정보 매핑 실패 ({e}), 기본값 사용.")
+        print(f" ⚠ ️ KIND 업종 정보 매핑 실패 ({e}), 기본값 사용.")
         df_krx["Sector"] = "기타업종"
 
     df_krx = df_krx[df_krx["Market"].isin(["KOSPI", "KOSDAQ"])].copy()
@@ -110,7 +111,7 @@ def calculate_technical_metrics():
             ret_3m = (current_price / close.iloc[-60]) - 1 if len(close) >= 60 else 0
             ret_6m = (current_price / close.iloc[-120]) - 1 if len(close) >= 120 else 0
             ret_12m = (current_price / close.iloc[-240]) - 1 if len(close) >= 240 else 0
-
+            
             weighted_momentum = (ret_1m * 0.35) + (ret_3m * 0.25) + (ret_6m * 0.20) + (ret_12m * 0.20)
 
             vol_avg50 = volume.rolling(50).mean()
@@ -141,10 +142,11 @@ def calculate_technical_metrics():
             continue
 
     if not results:
-        print("🚨 연산 가능한 종목 데이터가 존재하지 않습니다.")
+        print(" 🚨  연산 가능한 종목 데이터가 존재하지 않습니다.")
         return pd.DataFrame()
 
     df_res = pd.DataFrame(results)
+
     df_res["rs_score"] = pd.qcut(df_res["raw_momentum"].rank(method="first"), 99, labels=False) + 1
 
     ad_labels = ["E", "D", "C", "B", "A"]
@@ -152,6 +154,7 @@ def calculate_technical_metrics():
 
     industry_means = df_res.groupby("industry")["rs_score"].transform("mean")
     df_res["industry_rs_score"] = pd.qcut(industry_means.rank(method="first"), 99, labels=False) + 1
+
     df_res["smr_grade"] = "C"
 
     conn = sqlite3.connect(DB_NAME)
@@ -170,28 +173,26 @@ def calculate_technical_metrics():
             )
         except Exception:
             pass
+            
     conn.commit()
     conn.close()
 
     print(
-        f"✅ [2/4] 기술적 지표 저장 완료: {len(df_res)}종목 "
-        f"(스킵/오류 {fail_count}건) | RS 샘플 005930: "
-        f"{df_res[df_res['symbol']=='005930'][['rs_score','ad_grade','industry']].head(1).to_dict('records')}"
+        f" ✅  [2/4] 기술적 지표 저장 완료: {len(df_res)}종목 "
+        f"(스킵/오류 {fail_count}건)"
     )
     return df_res
 
-
 def update_dart_financials(df_res):
     """
-    전체 종목 재무 동기화 (증분).
-    - 최초: 5년치 전체 수집
-    - 이후: 최신 분기 공시가 반영됐을 때만 최근 연도 API 호출
-    - 이미 최신이면 스킵 (일일 배치 부담 최소화)
+    전체 종목 재무 동기화 (자동 청크 분할 로직 적용).
+    - API 한도와 시간 초과를 막기 위해 하루 최대 400개까지만 잘라서 업데이트합니다.
     """
-    print("🚀 [3/4] DART 재무 동기화 (전 종목·증분) 시작...")
+    print(" 🚀  [3/4] DART 재무 동기화 (청크 분할 적재) 시작...")
+
     api_key = get_dart_api_key() or DART_API_KEY
     if not api_key or api_key == "YOUR_ACTUAL_DART_API_KEY":
-        print("⚠️ DART 인증키가 없어 재무·SMR 업데이트를 건너뜁니다.")
+        print(" ⚠ ️ DART 인증키가 없어 재무·SMR 업데이트를 건너뜁니다.")
         return
 
     if df_res.empty:
@@ -199,16 +200,28 @@ def update_dart_financials(df_res):
 
     dart = OpenDartReader(api_key)
     targets = df_res["symbol"].astype(str).str.zfill(6).tolist()
+
     conn = sqlite3.connect(DB_NAME)
     init_financials_table(conn)
 
+    # 1. DB를 확인해서 아직 재무 데이터가 없거나 갱신이 필요한 종목만 추려냄
+    targets_to_update = []
+    for t in targets:
+        if needs_financial_update(conn, t) is not None:
+            targets_to_update.append(t)
+
+    print(f"   📊 전체 {len(targets)}종목 중 업데이트가 필요한 종목: {len(targets_to_update)}개")
+
+    # 2. API 한도 및 시간 초과 방지를 위해 하루 최대 400개까지만 자름
+    targets_to_update = targets_to_update[:400]
+    print(f"   🎯 오늘 수집할 대상은 {len(targets_to_update)}종목입니다. (나머지는 내일 Actions에서 이어서 진행됩니다)")
+
     updated, skipped, failed = 0, 0, 0
-    for i, ticker in enumerate(targets):
+
+    for i, ticker in enumerate(targets_to_update):
         try:
-            if needs_financial_update(conn, ticker) is None:
-                skipped += 1
-                continue
             result = sync_symbol_financials(conn, dart, ticker)
+
             if result == "updated":
                 updated += 1
                 if updated % 20 == 0:
@@ -219,33 +232,35 @@ def update_dart_financials(df_res):
                 failed += 1
         except Exception:
             failed += 1
-        if (i + 1) % 200 == 0:
+
+        if (i + 1) % 50 == 0:
             conn.commit()
-            print(f"   ... {i+1}/{len(targets)} (갱신 {updated}, 스킵 {skipped}, 실패 {failed})")
+            print(f"   ... 진행률: {i+1}/{len(targets_to_update)} (갱신 {updated}, 실패 {failed})")
 
     conn.commit()
-    # 메타 일괄 정리 (스킵된 종목 포함)
-    for ticker in targets:
+
+    # 메타 일괄 정리 (오늘 수집 시도한 종목들 기준)
+    for ticker in targets_to_update:
         try:
             update_fetch_meta(conn, ticker)
         except Exception:
             pass
+
     conn.commit()
     conn.close()
-    print(
-        f"✅ [3/4] DART 완료: 전체 {len(targets)}종목 | "
-        f"갱신 {updated}, 스킵 {skipped}, 실패 {failed}"
-    )
 
+    print(f" ✅  [3/4] DART 완료: 금일 대상 {len(targets_to_update)}종목 | 갱신 {updated}, 스킵 {skipped}, 실패 {failed}")
 
 def apply_smr_grades(df_res):
     """전체 repo_results 종목 유니버스 기준 SMR 5분위 등급."""
-    print("🚀 [4/4] SMR 등급 산출 (전 종목 비교) 중...")
+    print(" 🚀  [4/4] SMR 등급 산출 (전 종목 비교) 중...")
+
     if df_res.empty:
         return df_res
 
     conn = sqlite3.connect(DB_NAME)
     symbols = df_res["symbol"].astype(str).str.zfill(6).tolist()
+
     metrics = collect_smr_metrics_for_universe(conn, symbols)
     grades = assign_smr_grades(metrics, all_symbols=symbols)
 
@@ -260,15 +275,14 @@ def apply_smr_grades(df_res):
             "smr_grade", "ad_grade", "adv_50", "industry",
         ]
     ].to_sql("repo_results", conn, if_exists="append", index=False)
+
     conn.commit()
     conn.close()
 
     dist = df_res["smr_grade"].value_counts().to_dict()
-    print(
-        f"✅ [4/4] SMR 반영: 비교 가능 {len(metrics)}/{len(symbols)}종목 | 분포 {dist}"
-    )
-    return df_res
+    print(f" ✅  [4/4] SMR 반영: 비교 가능 {len(metrics)}/{len(symbols)}종목 | 분포 {dist}")
 
+    return df_res
 
 if __name__ == "__main__":
     init_database()
