@@ -212,8 +212,8 @@ def update_dart_financials(df_res):
 
     print(f"   📊 전체 {len(targets)}종목 중 업데이트가 필요한 종목: {len(targets_to_update)}개")
 
-    # 2. API 한도 및 시간 초과 방지를 위해 하루 최대 400개까지만 자름
-    targets_to_update = targets_to_update[:400]
+    # 2. API 한도 및 시간 초과 방지를 위해 하루 최대 100개까지만 자름
+    targets_to_update = targets_to_update[:100]
     print(f"   🎯 오늘 수집할 대상은 {len(targets_to_update)}종목입니다. (나머지는 내일 Actions에서 이어서 진행됩니다)")
 
     updated, skipped, failed = 0, 0, 0
