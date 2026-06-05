@@ -3,7 +3,7 @@ pandas
 numpy
 altair
 finance-datareader
-OpenDartReader==0.3.1
+opendartreader==0.2.3
 requests
 lxml
 html5lib
