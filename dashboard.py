@@ -1,13 +1,10 @@
 # -*- coding: utf-8 -*-
 import os
 import sqlite3
-
 import altair as alt
-import FinanceDataReader as fdr
 import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
-
 from kr_financials import (
     DB_NAME,
     build_financial_display_table,
@@ -17,7 +14,6 @@ from kr_financials import (
 )
 
 GRADES = ["A", "B", "C", "D", "E"]
-
 
 def get_data():
     if not os.path.exists(DB_NAME):
@@ -35,7 +31,6 @@ def get_data():
         conn.close()
     return df
 
-
 def get_rs_history(ticker):
     if not os.path.exists(DB_NAME):
         return pd.DataFrame()
@@ -51,13 +46,21 @@ def get_rs_history(ticker):
     conn.close()
     return hist
 
-
+# 💡 [핵심 최적화] KRX 서버 호출을 없애고 로컬 DB(깃허브 캐시)를 직접 참조합니다.
 @st.cache_data(ttl=86400)
 def _market_by_ticker():
-    df = fdr.StockListing("KRX")
-    t_col = "Code" if "Code" in df.columns else "Symbol"
-    return df.set_index(df[t_col].astype(str).str.zfill(6))["Market"].to_dict()
-
+    if not os.path.exists(DB_NAME):
+        return {}
+    conn = sqlite3.connect(DB_NAME)
+    try:
+        df = pd.read_sql("SELECT * FROM krx_tickers_cache", conn)
+        t_col = "Code" if "Code" in df.columns else "Symbol"
+        market_dict = df.set_index(df[t_col].astype(str).str.zfill(6))["Market"].to_dict()
+    except Exception:
+        market_dict = {}
+    finally:
+        conn.close()
+    return market_dict
 
 def tradingview_symbol(ticker):
     """한국 주식 TradingView 심볼 (KOSPI→KRX, KOSDAQ→KOSDAQ)."""
@@ -65,7 +68,6 @@ def tradingview_symbol(ticker):
     market = _market_by_ticker().get(code, "KOSPI")
     prefix = "KOSDAQ" if market == "KOSDAQ" else "KRX"
     return f"{prefix}:{code}"
-
 
 def format_adv(val):
     try:
@@ -78,14 +80,12 @@ def format_adv(val):
     except Exception:
         return "0원"
 
-
 def grade_filter_ui(label, session_key, default=None):
     """A~E 등급을 동그라미 버튼으로 노출·토글."""
     if default is None:
         default = ["A", "B", "C"]
     if session_key not in st.session_state:
         st.session_state[session_key] = list(default)
-
     st.caption(label)
     cols = st.columns(len(GRADES) + 1)
     for i, g in enumerate(GRADES):
@@ -97,7 +97,6 @@ def grade_filter_ui(label, session_key, default=None):
                 else:
                     st.session_state[session_key].append(g)
                 st.rerun()
-
     with cols[-1]:
         all_on = len(st.session_state[session_key]) == len(GRADES)
         if st.button(f"{'●' if all_on else '○'} 전체", key=f"{session_key}_all", use_container_width=True):
@@ -105,18 +104,15 @@ def grade_filter_ui(label, session_key, default=None):
             st.rerun()
     return st.session_state[session_key]
 
-
 def sector_filter_ui(all_sectors):
     """섹터(업종) 멀티 선택."""
     if "sector_sel" not in st.session_state:
         st.session_state.sector_sel = list(all_sectors)
-
     st.markdown("**섹터(업종) 필터**")
     is_all = len(st.session_state.sector_sel) == len(all_sectors)
     if st.button(f"{'●' if is_all else '○'} 섹터 전체 선택/해제", key="sector_all_btn", use_container_width=True):
         st.session_state.sector_sel = [] if is_all else list(all_sectors)
         st.rerun()
-
     cols = st.columns(2)
     for idx, sec in enumerate(all_sectors):
         with cols[idx % 2]:
@@ -129,7 +125,6 @@ def sector_filter_ui(all_sectors):
                     st.session_state.sector_sel.append(sec)
                 st.rerun()
     return st.session_state.sector_sel
-
 
 def render_tradingview_chart(ticker, height=520):
     tv_sym = tradingview_symbol(ticker)
@@ -160,7 +155,6 @@ def render_tradingview_chart(ticker, height=520):
     """
     components.html(html, height=height)
 
-
 def get_financial_table(ticker):
     ensure_ticker_financials(ticker, years_back=5)
     conn = sqlite3.connect(DB_NAME)
@@ -169,8 +163,8 @@ def get_financial_table(ticker):
     conn.close()
     return build_financial_display_table(df_q, max_quarters=20)
 
-
 st.set_page_config(layout="wide", page_title="한국 주도주 수급 종합 터미널")
+
 st.markdown(
     """
 <style>
@@ -195,7 +189,6 @@ df = get_data()
 
 if not df.empty:
     all_sectors = sorted(df["industry"].dropna().unique().tolist())
-
     with st.sidebar:
         is_mobile = st.toggle("📱 모바일 화면 최적화", value=False)
         st.header("필터링 기준 설정")
@@ -203,7 +196,6 @@ if not df.empty:
         min_adv_m = st.number_input("최소 거래대금 (억원)", value=10.0)
         rs_m = st.slider("최소 가중 RS 점수", 1, 99, 80)
         ind_rs_m = st.slider("최소 세부 섹터 RS 점수", 1, 99, 70)
-
         sector_sel = sector_filter_ui(all_sectors)
         smr_sel = grade_filter_ui("SMR 등급", "smr_sel", default=["A", "B", "C"])
         ad_sel = grade_filter_ui("AD 수급 등급", "ad_sel", default=["A", "B", "C", "D", "E"])
@@ -217,9 +209,7 @@ if not df.empty:
         & (df["ad_grade"].isin(ad_sel))
         & (df["industry"].isin(sector_sel))
     )
-
     f_df = df[mask].sort_values("rs_score", ascending=False).copy()
-
     display_df = f_df.copy()
     display_df["adv_50"] = display_df["adv_50"].apply(format_adv)
     display_df = display_df[
@@ -264,7 +254,6 @@ if not df.empty:
         if len(sel_row.selection.rows) > 0:
             target = f_df.iloc[sel_row.selection.rows[0]]
             ticker = str(target["symbol"]).zfill(6)
-
             st.markdown(
                 f"## {target['name']} ({ticker}) "
                 f"<span style='font-size:16px;color:#9CA3AF;'>{target['industry']}</span>",
@@ -327,13 +316,11 @@ if not df.empty:
                     st.markdown("#### 최근 5년 분기 재무 (전년동기 대비 성장률 포함)")
 
                     def fmt_money(x):
-                        if pd.isna(x):
-                            return "-"
+                        if pd.isna(x): return "-"
                         return f"{x:,.0f}"
 
                     def fmt_pct(x):
-                        if pd.isna(x):
-                            return "-"
+                        if pd.isna(x): return "-"
                         return f"{x:+.1f}%"
 
                     show = fin_table.copy()
@@ -341,11 +328,8 @@ if not df.empty:
                         show[col] = show[col].apply(fmt_money)
                     for col in ["매출 YoY(%)", "영업이익 YoY(%)", "순이익 YoY(%)", "EPS YoY(%)"]:
                         show[col] = show[col].apply(fmt_pct)
-
                     st.dataframe(show, use_container_width=True, hide_index=True)
         else:
             st.info("👈 스크리닝 리스트에서 분석할 종목을 선택해 주세요.")
 else:
-    st.warning(
-        "데이터베이스가 비어 있습니다. 터미널에서 `python kr_update_data.py`를 실행해 주세요."
-    )
+    st.warning("데이터베이스가 비어 있습니다. 터미널에서 `python kr_update_data.py`를 실행해 주세요.")
