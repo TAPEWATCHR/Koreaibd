@@ -20,7 +20,7 @@ from kr_financials import (
 )
 import OpenDartReader
 
-# 환경변수 DART_API_KEY 우선, 없으면 로컬 기본값(배포 시 GitHub Secrets 권장)
+# 환경변수 DART_API_KEY 우선, 없으면 로컬 기본값
 DART_API_KEY = os.environ.get(
     "DART_API_KEY",
     "74338fa9ee91fca6545b4bc7caec0c71d581e84b",
@@ -32,7 +32,6 @@ if DART_API_KEY and DART_API_KEY != "YOUR_ACTUAL_DART_API_KEY":
 def init_database():
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
-
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS repo_results (
             symbol TEXT PRIMARY KEY,
@@ -46,7 +45,6 @@ def init_database():
             industry TEXT
         )
     """)
-
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS rs_history (
             symbol TEXT,
@@ -56,15 +54,29 @@ def init_database():
             PRIMARY KEY (symbol, date)
         )
     """)
-
     init_financials_table(conn)
     conn.commit()
     conn.close()
 
 def calculate_technical_metrics():
     print(" 🚀  [1/4] 한국거래소 상장 종목 및 세부 섹터 정보 수집 중...")
-    df_krx = fdr.StockListing("KRX")
-    
+    conn = sqlite3.connect(DB_NAME)
+
+    try:
+        df_krx = fdr.StockListing("KRX")
+        # 💡 [핵심 최적화] KRX 서버 차단 방지를 위해 불러온 최신 리스트를 DB에 캐싱(저장)합니다.
+        df_krx.to_sql("krx_tickers_cache", conn, if_exists="replace", index=False)
+        print("    ✅ KRX 종목 리스트 최신화 및 DB 저장 완료")
+    except Exception as e:
+        print(f" ⚠️ KRX 서버 응답 차단/지연. DB에 저장된 기존 캐시 리스트를 사용합니다: {e}")
+        try:
+            df_krx = pd.read_sql("SELECT * FROM krx_tickers_cache", conn)
+            print("    ✅ 기존 DB에서 종목 리스트 불러오기 성공")
+        except Exception:
+            print(" 🚨 기존 캐시 데이터가 없습니다. 연산을 종료합니다.")
+            conn.close()
+            return pd.DataFrame()
+
     t_col = "Code" if "Code" in df_krx.columns else "Symbol"
     n_col = "Name" if "Name" in df_krx.columns else "CodeName"
 
@@ -143,21 +155,17 @@ def calculate_technical_metrics():
 
     if not results:
         print(" 🚨  연산 가능한 종목 데이터가 존재하지 않습니다.")
+        conn.close()
         return pd.DataFrame()
 
     df_res = pd.DataFrame(results)
-
     df_res["rs_score"] = pd.qcut(df_res["raw_momentum"].rank(method="first"), 99, labels=False) + 1
-
     ad_labels = ["E", "D", "C", "B", "A"]
     df_res["ad_grade"] = pd.qcut(df_res["ad_ratio"].rank(method="first"), 5, labels=ad_labels).astype(str)
-
     industry_means = df_res.groupby("industry")["rs_score"].transform("mean")
     df_res["industry_rs_score"] = pd.qcut(industry_means.rank(method="first"), 99, labels=False) + 1
-
     df_res["smr_grade"] = "C"
 
-    conn = sqlite3.connect(DB_NAME)
     df_res[
         [
             "symbol", "name", "price", "rs_score", "industry_rs_score",
@@ -177,17 +185,10 @@ def calculate_technical_metrics():
     conn.commit()
     conn.close()
 
-    print(
-        f" ✅  [2/4] 기술적 지표 저장 완료: {len(df_res)}종목 "
-        f"(스킵/오류 {fail_count}건)"
-    )
+    print(f" ✅  [2/4] 기술적 지표 저장 완료: {len(df_res)}종목 (스킵/오류 {fail_count}건)")
     return df_res
 
 def update_dart_financials(df_res):
-    """
-    전체 종목 재무 동기화 (자동 청크 분할 로직 적용).
-    - API 한도와 시간 초과를 막기 위해 하루 최대 400개까지만 잘라서 업데이트합니다.
-    """
     print(" 🚀  [3/4] DART 재무 동기화 (청크 분할 적재) 시작...")
 
     api_key = get_dart_api_key() or DART_API_KEY
@@ -204,7 +205,6 @@ def update_dart_financials(df_res):
     conn = sqlite3.connect(DB_NAME)
     init_financials_table(conn)
 
-    # 1. DB를 확인해서 아직 재무 데이터가 없거나 갱신이 필요한 종목만 추려냄
     targets_to_update = []
     for t in targets:
         if needs_financial_update(conn, t) is not None:
@@ -212,16 +212,15 @@ def update_dart_financials(df_res):
 
     print(f"   📊 전체 {len(targets)}종목 중 업데이트가 필요한 종목: {len(targets_to_update)}개")
 
-    # 2. API 한도 및 시간 초과 방지를 위해 하루 최대 100개까지만 자름
+    # 💡 100개로 축소 (안전한 수집)
     targets_to_update = targets_to_update[:100]
-    print(f"   🎯 오늘 수집할 대상은 {len(targets_to_update)}종목입니다. (나머지는 내일 Actions에서 이어서 진행됩니다)")
+    print(f"   🎯 오늘 수집할 대상은 {len(targets_to_update)}종목입니다.")
 
     updated, skipped, failed = 0, 0, 0
 
     for i, ticker in enumerate(targets_to_update):
         try:
             result = sync_symbol_financials(conn, dart, ticker)
-
             if result == "updated":
                 updated += 1
                 if updated % 20 == 0:
@@ -239,7 +238,6 @@ def update_dart_financials(df_res):
 
     conn.commit()
 
-    # 메타 일괄 정리 (오늘 수집 시도한 종목들 기준)
     for ticker in targets_to_update:
         try:
             update_fetch_meta(conn, ticker)
@@ -248,13 +246,10 @@ def update_dart_financials(df_res):
 
     conn.commit()
     conn.close()
-
     print(f" ✅  [3/4] DART 완료: 금일 대상 {len(targets_to_update)}종목 | 갱신 {updated}, 스킵 {skipped}, 실패 {failed}")
 
 def apply_smr_grades(df_res):
-    """전체 repo_results 종목 유니버스 기준 SMR 5분위 등급."""
     print(" 🚀  [4/4] SMR 등급 산출 (전 종목 비교) 중...")
-
     if df_res.empty:
         return df_res
 
