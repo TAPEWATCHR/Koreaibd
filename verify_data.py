@@ -15,7 +15,7 @@ from kr_financials import (
     init_financials_table,
     save_financial_rows,
 )
-import OpenDartReader
+import opendartreader as OpenDartReader
 
 
 def main():
