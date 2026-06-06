@@ -46,7 +46,6 @@ def get_rs_history(ticker):
     conn.close()
     return hist
 
-# 💡 [핵심 최적화] KRX 서버 호출을 없애고 로컬 DB(깃허브 캐시)를 직접 참조합니다.
 @st.cache_data(ttl=86400)
 def _market_by_ticker():
     if not os.path.exists(DB_NAME):
@@ -105,33 +104,40 @@ def grade_filter_ui(label, session_key, default=None):
     return st.session_state[session_key]
 
 def sector_filter_ui(all_sectors):
-    """섹터(업종) 멀티 선택."""
+    """섹터(업종) 멀티 선택 - 접기/펼치기 및 전체선택 기능 적용"""
     if "sector_sel" not in st.session_state:
         st.session_state.sector_sel = list(all_sectors)
-    st.markdown("**섹터(업종) 필터**")
-    is_all = len(st.session_state.sector_sel) == len(all_sectors)
-    if st.button(f"{'●' if is_all else '○'} 섹터 전체 선택/해제", key="sector_all_btn", use_container_width=True):
-        st.session_state.sector_sel = [] if is_all else list(all_sectors)
-        st.rerun()
-    cols = st.columns(2)
-    for idx, sec in enumerate(all_sectors):
-        with cols[idx % 2]:
-            sel = sec in st.session_state.sector_sel
-            label = (str(sec)[:14] + "…") if len(str(sec)) > 14 else str(sec)
-            if st.button(f"{'●' if sel else '○'} {label}", key=f"sec_{sec}", use_container_width=True):
-                if sel:
-                    st.session_state.sector_sel.remove(sec)
-                else:
-                    st.session_state.sector_sel.append(sec)
-                st.rerun()
+        
+    # expander를 사용하여 기본적으로 목록을 숨겨둠
+    with st.expander("📊 섹터(업종) 필터", expanded=False):
+        is_all = len(st.session_state.sector_sel) == len(all_sectors)
+        
+        # 전체 선택 / 해제 버튼
+        if st.button(f"{'●' if is_all else '○'} 전체 선택 / 해제", key="sector_all_btn", use_container_width=True):
+            st.session_state.sector_sel = [] if is_all else list(all_sectors)
+            st.rerun()
+            
+        cols = st.columns(2)
+        for idx, sec in enumerate(all_sectors):
+            with cols[idx % 2]:
+                sel = sec in st.session_state.sector_sel
+                label = (str(sec)[:14] + "…") if len(str(sec)) > 14 else str(sec)
+                if st.button(f"{'●' if sel else '○'} {label}", key=f"sec_{sec}", use_container_width=True):
+                    if sel:
+                        st.session_state.sector_sel.remove(sec)
+                    else:
+                        st.session_state.sector_sel.append(sec)
+                    st.rerun()
+                    
     return st.session_state.sector_sel
 
 def render_tradingview_chart(ticker, height=520):
     tv_sym = tradingview_symbol(ticker)
-    safe_id = str(ticker).replace(".", "_")
+    safe_id = f"tradingview_{str(ticker).replace('.', '_')}"
+    
     html = f"""
     <div class="tradingview-widget-container" style="height:{height}px;width:100%;">
-      <div id="tradingview_{safe_id}" style="height:100%;width:100%;"></div>
+      <div id="{safe_id}" style="height:100%;width:100%;"></div>
       <script type="text/javascript" src="https://s3.tradingview.com/tv.js"></script>
       <script type="text/javascript">
       new TradingView.widget({{
@@ -143,12 +149,12 @@ def render_tradingview_chart(ticker, height=520):
         "style": "1",
         "locale": "kr",
         "enable_publishing": false,
-        "allow_symbol_change": false,
+        "allow_symbol_change": true, 
         "backgroundColor": "#161C27",
         "gridColor": "#2A3143",
         "hide_top_toolbar": false,
         "save_image": false,
-        "container_id": "tradingview_{safe_id}"
+        "container_id": "{safe_id}"
       }});
       </script>
     </div>
@@ -189,8 +195,9 @@ df = get_data()
 
 if not df.empty:
     all_sectors = sorted(df["industry"].dropna().unique().tolist())
+    
     with st.sidebar:
-        is_mobile = st.toggle("📱 모바일 화면 최적화", value=False)
+        is_mobile = st.toggle(" 📱  모바일 화면 최적화", value=False)
         st.header("필터링 기준 설정")
         min_p = st.number_input("최소 주가 (원)", value=1000.0)
         min_adv_m = st.number_input("최소 거래대금 (억원)", value=10.0)
@@ -209,6 +216,7 @@ if not df.empty:
         & (df["ad_grade"].isin(ad_sel))
         & (df["industry"].isin(sector_sel))
     )
+    
     f_df = df[mask].sort_values("rs_score", ascending=False).copy()
     display_df = f_df.copy()
     display_df["adv_50"] = display_df["adv_50"].apply(format_adv)
@@ -261,7 +269,7 @@ if not df.empty:
             )
             st.caption(f"TradingView: {tradingview_symbol(ticker)}")
 
-            t_chart, t_check, t_fin = st.tabs(["📊 TradingView 차트", "🛡️ 캔슬림 검증", "🧾 재무 (5년 분기)"])
+            t_chart, t_check, t_fin = st.tabs([" 📊  TradingView 차트", " 🛡 ️ 캔슬림 검증", " 🧾  재무 (5년 분기)"])
 
             with t_chart:
                 render_tradingview_chart(ticker)
@@ -297,7 +305,7 @@ if not df.empty:
                 ]
                 for c in canslim:
                     cls = "check-pass" if c["pass"] else "check-fail"
-                    icon = "✅" if c["pass"] else "❌"
+                    icon = " ✅ " if c["pass"] else " ❌ "
                     st.markdown(
                         f'<div class="check-box {cls}">{icon} {c["name"]}</div>',
                         unsafe_allow_html=True,
@@ -313,23 +321,49 @@ if not df.empty:
                         "`kr_update_data.py`를 실행하거나 잠시 후 다시 시도해 주세요."
                     )
                 else:
-                    st.markdown("#### 최근 5년 분기 재무 (전년동기 대비 성장률 포함)")
+                    st.markdown("#### 최근 5년 분기 재무 (단위: 백만원)")
 
-                    def fmt_money(x):
-                        if pd.isna(x): return "-"
-                        return f"{x:,.0f}"
+                    # 백만원 단위로 렌더링하도록 포맷팅 로직 수정
+                    def fmt_money(x, is_million=True):
+                        if pd.isna(x):
+                            return "-"
+                        if is_million:
+                            return f"{x / 1000000:,.0f}"
+                        else:
+                            return f"{x:,.0f}"
 
                     def fmt_pct(x):
-                        if pd.isna(x): return "-"
+                        if pd.isna(x):
+                            return "-"
                         return f"{x:+.1f}%"
 
                     show = fin_table.copy()
-                    for col in ["매출액(원)", "영업이익(원)", "당기순이익(원)", "EPS(원)"]:
-                        show[col] = show[col].apply(fmt_money)
+                    
+                    # 데이터프레임 헤더명 백만원으로 리네임
+                    show.rename(columns={
+                        "매출액(원)": "매출액(백만원)",
+                        "영업이익(원)": "영업이익(백만원)",
+                        "당기순이익(원)": "당기순이익(백만원)"
+                    }, inplace=True)
+                    
+                    # 매출, 영업이익, 순이익은 백만원으로 치환 (100만 나누기)
+                    for col in ["매출액(백만원)", "영업이익(백만원)", "당기순이익(백만원)"]:
+                        if col in show.columns:
+                            show[col] = show[col].apply(lambda x: fmt_money(x, is_million=True))
+                    
+                    # 1주당 가치인 EPS는 원본(원 단위) 유지
+                    if "EPS(원)" in show.columns:
+                        show["EPS(원)"] = show["EPS(원)"].apply(lambda x: fmt_money(x, is_million=False))
+
+                    # 성장률 퍼센트 포맷팅
                     for col in ["매출 YoY(%)", "영업이익 YoY(%)", "순이익 YoY(%)", "EPS YoY(%)"]:
-                        show[col] = show[col].apply(fmt_pct)
+                        if col in show.columns:
+                            show[col] = show[col].apply(fmt_pct)
+                            
                     st.dataframe(show, use_container_width=True, hide_index=True)
         else:
-            st.info("👈 스크리닝 리스트에서 분석할 종목을 선택해 주세요.")
+            st.info(" 👈  스크리닝 리스트에서 분석할 종목을 선택해 주세요.")
 else:
-    st.warning("데이터베이스가 비어 있습니다. 터미널에서 `python kr_update_data.py`를 실행해 주세요.")
+    st.warning(
+        "데이터베이스가 비어 있습니다. 터미널에서 `python kr_update_data.py`를 실행해 주세요."
+    )
