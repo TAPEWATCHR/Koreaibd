@@ -7,7 +7,7 @@ import datetime
 
 import pandas as pd
 import numpy as np
-import OpenDartReader
+import opendartreader as OpenDartReader
 
 DB_NAME = os.environ.get("KR_IBD_DB", "kr_ibd_system.db")
 DART_API_KEY = os.environ.get("DART_API_KEY", "")
