@@ -2,7 +2,7 @@ streamlit
 pandas
 numpy
 altair
-finance-datareader
+FinanceDataReader
 opendartreader
 requests
 lxml
