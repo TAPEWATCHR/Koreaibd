@@ -7,3 +7,4 @@ opendartreader
 requests
 lxml
 html5lib
+plotly
