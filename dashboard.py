@@ -5,7 +5,7 @@ import altair as alt
 import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
-import finance_datareader as fdr  # 데이터 수집 라이브러리 추가
+import FinanceDataReader as fdr  # 데이터 수집 라이브러리 추가
 import plotly.graph_objects as go  # Plotly 추가
 from plotly.subplots import make_subplots  # 서브플롯 추가
 from datetime import datetime, timedelta
