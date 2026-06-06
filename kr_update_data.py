@@ -18,7 +18,7 @@ from kr_financials import (
     sync_symbol_financials,
     update_fetch_meta,
 )
-import opendartreader as OpenDartReader
+from opendartreader import OpenDartReader
 
 # 환경변수 DART_API_KEY 우선, 없으면 로컬 기본값
 DART_API_KEY = os.environ.get(
