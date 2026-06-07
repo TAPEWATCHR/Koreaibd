@@ -5,7 +5,7 @@ import altair as alt
 import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
-import finance-datareader as fdr
+import FinanceDataReader as fdr
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from datetime import datetime, timedelta
