@@ -267,8 +267,8 @@ def render_custom_plotly_chart(ticker, timeframe):
         tickfont=dict(color="#FFFFFF"),
         rangebreaks=[dict(bounds=["sat", "mon"])] 
     )
-    fig.update_yaxis(tickformat=",d", gridcolor="#2A3143", tickfont=dict(color="#FFFFFF"), row=1, col=1)
-    fig.update_yaxis(tickformat=",d", gridcolor="#2A3143", tickfont=dict(color="#FFFFFF"), row=2, col=1)
+    fig.update_yaxes(tickformat=",d", gridcolor="#2A3143", tickfont=dict(color="#FFFFFF"), row=1, col=1)
+    fig.update_yaxes(tickformat=",d", gridcolor="#2A3143", tickfont=dict(color="#FFFFFF"), row=2, col=1)
 
     st.plotly_chart(fig, use_container_width=True)
 
