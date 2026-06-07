@@ -5,9 +5,9 @@ import altair as alt
 import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
-import FinanceDataReader as fdr  # 데이터 수집 라이브러리 추가
-import plotly.graph_objects as go  # Plotly 추가
-from plotly.subplots import make_subplots  # 서브플롯 추가
+import FinanceDataReader as fdr
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 from datetime import datetime, timedelta
 from kr_financials import (
     DB_NAME,
@@ -142,13 +142,13 @@ def get_financial_table(ticker):
     return build_financial_display_table(df_q, max_quarters=20)
 
 
-# --- 🛠️ 커스텀 Plotly 트레이딩뷰 스타일 차트 렌더링 함수 추가 ---
+# --- 🛠️ 커스텀 Plotly 트레이딩뷰 스타일 차트 렌더링 ---
 def render_custom_plotly_chart(ticker, timeframe):
     end_date = datetime.today()
-    start_date = end_date - timedelta(days=365 * 2)  # 이평선 계산을 위해 2년 수집
+    # 이평선 계산(200일)을 위해 과거 2년치 데이터 넉넉히 수집
+    start_date = end_date - timedelta(days=365 * 2) 
     
     try:
-        # 데이터 수집
         price_df = fdr.DataReader(ticker, start=start_date, end=end_date)
     except Exception as e:
         st.error(f"차트용 데이터를 가져오지 못했습니다: {e}")
@@ -158,34 +158,35 @@ def render_custom_plotly_chart(ticker, timeframe):
         st.warning("차트 데이터가 비어 있습니다.")
         return
 
-    # 기본 변동 금액/변동률 연산
-    price_df['Prev_Close'] = price_df['Close'].shift(1)
-    price_df['Chg_Amt'] = price_df['Close'] - price_df['Prev_Close']
-    price_df['Chg_Pct'] = (price_df['Chg_Amt'] / price_df['Prev_Close']) * 100
-
-    # 일간 / 주간 데이터 스위칭 처리
+    # 일간 / 주간 데이터 스위칭 및 이동평균선 처리
     if "주간" in timeframe:
-        df_resampled = price_df.resample('W-MON').agg({
+        # 주간 봉으로 리샘플링 (금요일 기준)
+        df_resampled = price_df.resample('W-FRI').agg({
             'Open': 'first', 'High': 'max', 'Low': 'min', 'Close': 'last', 'Volume': 'sum'
         }).dropna()
+        
         df_resampled['Prev_Close'] = df_resampled['Close'].shift(1)
         df_resampled['Chg_Amt'] = df_resampled['Close'] - df_resampled['Prev_Close']
         df_resampled['Chg_Pct'] = (df_resampled['Chg_Amt'] / df_resampled['Prev_Close']) * 100
         
-        # 주간 이동평균선
+        # 주간 이동평균선 (10주, 40주)
         df_resampled['MA10'] = df_resampled['Close'].rolling(window=10).mean()
         df_resampled['MA40'] = df_resampled['Close'].rolling(window=40).mean()
         chart_df = df_resampled
     else:
-        # 일간 이동평균선
+        price_df['Prev_Close'] = price_df['Close'].shift(1)
+        price_df['Chg_Amt'] = price_df['Close'] - price_df['Prev_Close']
+        price_df['Chg_Pct'] = (price_df['Chg_Amt'] / price_df['Prev_Close']) * 100
+
+        # 일간 이동평균선 (10일, 20일, 50일, 200일)
         price_df['MA10'] = price_df['Close'].rolling(window=10).mean()
         price_df['MA20'] = price_df['Close'].rolling(window=20).mean()
         price_df['MA50'] = price_df['Close'].rolling(window=50).mean()
         price_df['MA200'] = price_df['Close'].rolling(window=200).mean()
         chart_df = price_df
 
-    # 최근 1년 구간 필터링
-    one_year_ago = datetime.today() - timedelta(days=365)
+    # 화면 표시를 위해 최근 1년 데이터만 필터링
+    one_year_ago = end_date - timedelta(days=365)
     chart_df = chart_df[chart_df.index >= one_year_ago]
 
     if chart_df.empty:
@@ -199,7 +200,7 @@ def render_custom_plotly_chart(ticker, timeframe):
     drop_from_high = ((latest_close - period_high) / period_high) * 100
     rise_from_low = ((latest_close - period_low) / period_low) * 100
 
-    # 상단 변동률 대시보드 렌더링
+    # 상단 요약 매트릭스 렌더링
     c1, c2, c3 = st.columns(3)
     c1.metric("현재 차트 종가", f"{int(latest_close):,} 원")
     c2.metric("최근 1년 고점 대비", f"{drop_from_high:.2f} %", delta=f"최고: {int(period_high):,}", delta_color="inverse")
@@ -208,39 +209,47 @@ def render_custom_plotly_chart(ticker, timeframe):
     # Subplot 생성 (캔들스틱 80%, 거래량 20%)
     fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.03, row_heights=[0.8, 0.2])
 
-    color_inc = '#1E1E1E'  # 상승: 검은색 계열 (다크모드 가독성을 위해 살짝 옅은 검은색)
-    color_dec = '#FF3B30'  # 하락: 붉은색
+    # 색상 지정 (다크모드 최적화)
+    color_up_fill = '#000000' # 상승 캔들 채우기 (검은색)
+    color_up_line = '#D1D5DB' # 상승 캔들/거래량 테두리 (밝은 회색/흰색)
+    color_down = '#FF3B30'    # 하락 캔들/거래량 (붉은색)
 
-    # 캔들스틱 차트 추가
+    # 마우스 오버 시 표시할 텍스트 포맷팅
+    hover_text = [
+        f"전일대비: {amt:+,.0f}원 ({pct:+.2f}%)<br>거래량: {vol:,.0f}주" 
+        for amt, pct, vol in zip(chart_df['Chg_Amt'], chart_df['Chg_Pct'], chart_df['Volume'])
+    ]
+
+    # 1. 캔들스틱 차트 추가
     fig.add_trace(go.Candlestick(
-        x=chart_df.index, open=chart_df['Open'], high=chart_df['High'], low=chart_df['Low'], close=chart_df['Close'],
-        increasing_line_color=color_inc, increasing_fillcolor=color_inc,
-        decreasing_line_color=color_dec, decreasing_fillcolor=color_dec,
+        x=chart_df.index,
+        open=chart_df['Open'], high=chart_df['High'], low=chart_df['Low'], close=chart_df['Close'],
+        increasing_line_color=color_up_line, increasing_fillcolor=color_up_fill,
+        decreasing_line_color=color_down, decreasing_fillcolor=color_down,
         name="가격",
-        text=[f"전일대비: {amt:+,}원 ({pct:+.2f}%)" for amt, pct in zip(chart_df['Chg_Amt'], chart_df['Chg_Pct'])],
-        hovertemplate="<b>%{x}</b><br>시가: %{open:,}원<br>고가: %{high:,}원<br>저가: %{low:,}원<br>종가: %{close:,}원<br>%{text}<extra></extra>"
+        text=hover_text,
+        hovertemplate="<b>%{x}</b><br>시가: %{open:,.0f}원<br>고가: %{high:,.0f}원<br>저가: %{low:,.0f}원<br>종가: %{close:,.0f}원<br>%{text}<extra></extra>"
     ), row=1, col=1)
 
-    # 주기별 이동평균선 오버레이
+    # 2. 이동평균선 오버레이
     if "주간" in timeframe:
-        fig.add_trace(go.Scatter(x=chart_df.index, y=chart_df['MA10'], name="10주선", line=dict(color='#5AC8FA', width=1.5)), row=1, col=1)
-        fig.add_trace(go.Scatter(x=chart_df.index, y=chart_df['MA40'], name="40주선", line=dict(color='#5856D6', width=1.5)), row=1, col=1)
+        fig.add_trace(go.Scatter(x=chart_df.index, y=chart_df['MA10'], name="10주선", line=dict(color='#38BDF8', width=1.5)), row=1, col=1) # 하늘색
+        fig.add_trace(go.Scatter(x=chart_df.index, y=chart_df['MA40'], name="40주선", line=dict(color='#A855F7', width=1.5)), row=1, col=1) # 보라색
     else:
-        fig.add_trace(go.Scatter(x=chart_df.index, y=chart_df['MA10'], name="10일선", line=dict(color='#5AC8FA', width=1.2)), row=1, col=1)
-        fig.add_trace(go.Scatter(x=chart_df.index, y=chart_df['MA20'], name="20일선", line=dict(color='#007AFF', width=1.2)), row=1, col=1)
-        fig.add_trace(go.Scatter(x=chart_df.index, y=chart_df['MA50'], name="50일선", line=dict(color='#9CA3AF', width=1.2)), row=1, col=1) # 어두운 배경 고려 남색 대신 회색 계열 배정
-        fig.add_trace(go.Scatter(x=chart_df.index, y=chart_df['MA200'], name="200일선", line=dict(color='#8946D6', width=1.5)), row=1, col=1)
+        fig.add_trace(go.Scatter(x=chart_df.index, y=chart_df['MA10'], name="10일선", line=dict(color='#38BDF8', width=1.2)), row=1, col=1) # 하늘색
+        fig.add_trace(go.Scatter(x=chart_df.index, y=chart_df['MA20'], name="20일선", line=dict(color='#3B82F6', width=1.2)), row=1, col=1) # 파란색
+        fig.add_trace(go.Scatter(x=chart_df.index, y=chart_df['MA50'], name="50일선", line=dict(color='#1E3A8A', width=1.5)), row=1, col=1) # 남색
+        fig.add_trace(go.Scatter(x=chart_df.index, y=chart_df['MA200'], name="200일선", line=dict(color='#A855F7', width=1.5)), row=1, col=1) # 보라색
 
-    # 가격 연동 거래량 색상 리스트 생성
-    v_colors = [color_inc if c >= o else color_dec for o, c in zip(chart_df['Open'], chart_df['Close'])]
-
-    # 거래량 추가
+    # 3. 거래량 추가 (가격 차트와 동일한 색상 배정)
+    v_colors = [color_up_line if c >= o else color_down for o, c in zip(chart_df['Open'], chart_df['Close'])]
     fig.add_trace(go.Bar(
-        x=chart_df.index, y=chart_df['Volume'], marker_color=v_colors, name="거래량",
-        hovertemplate="<b>%{x}</b><br>거래량: %{y:,}주<extra></extra>"
+        x=chart_df.index,
+        y=chart_df['Volume'], marker_color=v_colors, name="거래량",
+        hovertemplate="<b>%{x}</b><br>거래량: %{y:,.0f}주<extra></extra>"
     ), row=2, col=1)
 
-    # 레이아웃 튜닝 (다크테마 매칭)
+    # 레이아웃 튜닝 (다크테마 매칭 및 주말 공백 제거)
     fig.update_layout(
         height=550,
         paper_bgcolor="#161C27",
@@ -251,7 +260,13 @@ def render_custom_plotly_chart(ticker, timeframe):
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1, font=dict(color="#FFFFFF")),
         margin=dict(l=40, r=40, t=10, b=10)
     )
-    fig.update_xaxes(gridcolor="#2A3143", tickfont=dict(color="#FFFFFF"))
+    
+    # 주말(토,일) 차트 공백 제거 적용
+    fig.update_xaxes(
+        gridcolor="#2A3143", 
+        tickfont=dict(color="#FFFFFF"),
+        rangebreaks=[dict(bounds=["sat", "mon"])] 
+    )
     fig.update_yaxis(tickformat=",d", gridcolor="#2A3143", tickfont=dict(color="#FFFFFF"), row=1, col=1)
     fig.update_yaxis(tickformat=",d", gridcolor="#2A3143", tickfont=dict(color="#FFFFFF"), row=2, col=1)
 
@@ -287,7 +302,7 @@ if not df.empty:
     all_sectors = sorted(df["industry"].dropna().unique().tolist())
     
     with st.sidebar:
-        is_mobile = st.toggle(" 📱   모바일 화면 최적화", value=False)
+        is_mobile = st.toggle(" 📱  모바일 화면 최적화", value=False)
         st.header("필터링 기준 설정")
         min_p = st.number_input("최소 주가 (원)", value=1000.0)
         min_adv_m = st.number_input("최소 거래대금 (억원)", value=10.0)
@@ -357,12 +372,11 @@ if not df.empty:
                 f"<span style='font-size:16px;color:#9CA3AF;'>{target['industry']}</span>",
                 unsafe_allow_html=True,
             )
-            st.caption(f"TradingView 연동 심볼 참고: {tradingview_symbol(ticker)}")
 
-            t_chart, t_check, t_fin = st.tabs([" 📊   인터랙티브 차트", " 🛡 ️ 캔슬림 검증", " 🧾   재무 (5년 분기)"])
+            t_chart, t_check, t_fin = st.tabs([" 📊  인터랙티브 차트", " 🛡 ️ 캔슬림 검증", " 🧾  재무 (5년 분기)"])
 
             with t_chart:
-                # 탭 내부에 일간/주간 주기를 변경할 수 있는 라디오 스위치 배치
+                # 일간/주간 주기를 변경할 수 있는 라디오 스위치
                 tf_choice = st.radio("차트 주기 변환", ["일간 (Daily)", "주간 (Weekly)"], horizontal=True, key=f"tf_{ticker}")
                 
                 # 커스텀 캔들스틱 및 거래량 차트 실행
@@ -370,6 +384,7 @@ if not df.empty:
                 
                 st.markdown("#### RS 점수 추이")
                 rs_hist_df = get_rs_history(ticker)
+                
                 if not rs_hist_df.empty and len(rs_hist_df) > 1:
                     rs_hist_df["date"] = pd.to_datetime(rs_hist_df["date"])
                     rs_chart = (
@@ -452,7 +467,7 @@ if not df.empty:
                             
                     st.dataframe(show, use_container_width=True, hide_index=True)
         else:
-            st.info(" 👈   스크리닝 리스트에서 분석할 종목을 선택해 주세요.")
+            st.info(" 👈  스크리닝 리스트에서 분석할 종목을 선택해 주세요.")
 else:
     st.warning(
         "데이터베이스가 비어 있습니다. 터미널에서 `python kr_update_data.py`를 실행해 주세요."
