@@ -7,7 +7,7 @@ import datetime
 
 import pandas as pd
 import numpy as np
-import OpenDartReader
+import opendartreader
 
 DB_NAME = os.environ.get("KR_IBD_DB", "kr_ibd_system.db")
 DART_API_KEY = os.environ.get("DART_API_KEY", "")
@@ -375,7 +375,7 @@ def ensure_ticker_financials(ticker, years_back=5):
         conn.close()
         return True
 
-    dart = OpenDartReader(api_key)
+    dart = opendartreader.OpenDartReader(api_key)
     result = sync_symbol_financials(conn, dart, ticker)
     conn.commit()
     conn.close()
