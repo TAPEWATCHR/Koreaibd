@@ -21,13 +21,12 @@ jobs:
     - name: 파이썬 환경 설정
       uses: actions/setup-python@v5
       with:
-        python-version: '3.13'
+        python-version: '3.11'  # 💡 데이터 라이브러리 호환성이 완벽한 3.11로 하향 안정화
 
     - name: 필수 라이브러리 설치
       run: |
         python -m pip install --upgrade pip
         pip install -r requirements.txt
-
 
     - name: 데이터 수집 및 계산기 실행
       env:
