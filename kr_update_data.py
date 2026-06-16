@@ -18,7 +18,7 @@ from kr_financials import (
     sync_symbol_financials,
     update_fetch_meta,
 )
-from opendartreader import OpenDartReader
+import opendartreader  # 💡 대소문자 오류 방지를 위해 소문자 모듈 사용
 
 # 환경변수 DART_API_KEY 우선, 없으면 로컬 기본값
 DART_API_KEY = os.environ.get(
@@ -199,7 +199,7 @@ def update_dart_financials(df_res):
     if df_res.empty:
         return
 
-    dart = OpenDartReader(api_key)
+    dart = opendartreader.OpenDartReader(api_key) # 💡 여기서 클래스를 소환하도록 변경
     targets = df_res["symbol"].astype(str).str.zfill(6).tolist()
 
     conn = sqlite3.connect(DB_NAME)
