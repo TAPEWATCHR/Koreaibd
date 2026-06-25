@@ -2,7 +2,7 @@ streamlit
 pandas
 numpy
 altair
-finance-datareader
+finance-datareader==0.9.50
 opendartreader==0.2.1
 requests
 lxml
