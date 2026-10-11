@@ -44,6 +44,18 @@ jobs:
         db_path = "kr_ibd_system.db"
         conn = sqlite3.connect(db_path)
         cur = conn.cursor()
+        # 과거에 저장된 YYYYMMDD 형식을 YYYY-MM-DD로 통일
+        cur.execute("""
+            UPDATE rs_history
+            SET date = substr(date, 1, 4) || '-' ||
+                       substr(date, 5, 2) || '-' ||
+                       substr(date, 7, 2)
+            WHERE length(date) = 8
+              AND date GLOB '[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]'
+        """)
+
+        print(f"날짜 형식 변경 기록 수: {cur.rowcount}")
+        conn.commit()
 
         cur.execute("""
             SELECT COUNT(*), MIN(date), MAX(date)
