@@ -34,6 +34,7 @@ jobs:
       run: |
         python kr_update_data.py
 
+   
     - name: RS 이력 DB 저장 확인
       run: |
         python - <<'PY'
@@ -41,21 +42,8 @@ jobs:
         import os
 
         db_path = "kr_ibd_system.db"
-
-        if not os.path.exists(db_path):
-            raise FileNotFoundError(f"DB 파일이 없습니다: {db_path}")
-
         conn = sqlite3.connect(db_path)
         cur = conn.cursor()
-
-        cur.execute("""
-            SELECT name FROM sqlite_master
-            WHERE type = 'table' AND name = 'rs_history'
-        """)
-
-        if cur.fetchone() is None:
-            conn.close()
-            raise RuntimeError("rs_history 테이블이 없습니다.")
 
         cur.execute("""
             SELECT COUNT(*), MIN(date), MAX(date)
@@ -64,20 +52,42 @@ jobs:
         total, first_date, latest_date = cur.fetchone()
 
         print(f"RS 이력 전체 기록 수: {total}")
-        print(f"RS 이력 최초 날짜: {first_date}")
-        print(f"RS 이력 최신 날짜: {latest_date}")
+        print(f"문자열 기준 최초 날짜: {first_date}")
+        print(f"문자열 기준 최신 날짜: {latest_date}")
 
-        if latest_date:
-            cur.execute("""
-                SELECT COUNT(DISTINCT symbol), COUNT(*)
-                FROM rs_history
-                WHERE date = ?
-            """, (latest_date,))
-            symbols, records = cur.fetchone()
-            print(f"최신 날짜 기록 종목 수: {symbols}")
-            print(f"최신 날짜 기록 건수: {records}")
+        cur.execute("""
+            SELECT COUNT(*)
+            FROM rs_history
+            WHERE length(date) = 8
+        """)
+        compact_count = cur.fetchone()[0]
+        print(f"하이픈 없는 8자리 날짜 기록 수: {compact_count}")
 
-        print("최근 5개 날짜의 기록:")
+        print("하이픈 없는 날짜 상위 10개:")
+        cur.execute("""
+            SELECT date, COUNT(*)
+            FROM rs_history
+            WHERE length(date) = 8
+            GROUP BY date
+            ORDER BY date DESC
+            LIMIT 10
+        """)
+        for date, count in cur.fetchall():
+            print(f"  {date}: {count}건")
+
+        cur.execute("""
+            SELECT COUNT(*)
+            FROM rs_history a
+            JOIN rs_history b
+              ON a.symbol = b.symbol
+             AND a.date = replace(b.date, '-', '')
+            WHERE length(a.date) = 8
+              AND length(b.date) = 10
+        """)
+        collision_count = cur.fetchone()[0]
+        print(f"날짜 통일 시 충돌 가능성이 있는 기록 쌍: {collision_count}")
+
+        print("최근 날짜별 기록:")
         cur.execute("""
             SELECT date, COUNT(DISTINCT symbol), COUNT(*)
             FROM rs_history
@@ -85,12 +95,12 @@ jobs:
             ORDER BY date DESC
             LIMIT 5
         """)
-
         for date, symbols, records in cur.fetchall():
             print(f"  {date}: 종목 {symbols}개, 기록 {records}건")
 
         conn.close()
         PY
+
 
     - name: 변경된 DB 파일 깃허브에 업로드
       run: |
