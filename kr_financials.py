@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""DART 재무 수집·SMR 등급 산출 공통 모듈."""
+"""DART 재무 수집·SMR 등급 산출 공통 모듈 (투트랙 한국형 SMR 적용)."""
 import os
 import time
 import sqlite3
@@ -100,7 +100,6 @@ def extract_fin_dict(df_fin):
         return {}
     df_filtered["std_key"] = df_filtered["account_id"].map(ACCOUNT_MAPPING)
     df_filtered["amt"] = _parse_amount(df_filtered["thstrm_amount"])
-    # 동일 키가 여러 행이면 절대값이 큰 항목 우선
     df_filtered = df_filtered.sort_values("amt", key=lambda s: s.abs(), ascending=False)
     return df_filtered.groupby("std_key")["amt"].first().to_dict()
 
@@ -137,14 +136,12 @@ def _fetch_reports(dart, ticker, years, sleep_sec=0.08):
 
 
 def fetch_symbol_financials(dart, ticker, years_back=5):
-    """종목 1개: 최근 years_back년 분기·연간 재무 전체 수집 (최초 적재용)."""
     current_year = datetime.date.today().year
     years = list(range(current_year - years_back, current_year + 1))
     return _fetch_reports(dart, ticker, years)
 
 
 def fetch_symbol_financials_incremental(dart, ticker):
-    """이미 DB에 있는 종목: 최근 2개 연도만 조회해 신규 분기만 보충."""
     y = datetime.date.today().year
     return _fetch_reports(dart, ticker, [y, y - 1], sleep_sec=0.06)
 
@@ -165,12 +162,6 @@ def get_symbol_financial_status(conn, ticker):
 
 
 def needs_financial_update(conn, ticker, min_quarters=12):
-    """
-    재무 API 호출 필요 여부.
-    - None: 스킵 (이미 최신)
-    - 'full': 5년 전체 수집
-    - 'incremental': 최근 연도만 보충
-    """
     st = get_symbol_financial_status(conn, ticker)
     if st["count"] < min_quarters:
         return "full"
@@ -240,18 +231,25 @@ def _yoy_pct(current, prior):
 
 
 def smr_metrics_from_quarterly(df_q):
-    """분기 재무로 SMR용 3개 지표(매출 YoY, 영업이익률 YoY, ROE YoY) 산출."""
-    if df_q.empty:
+    """
+    한국형 투트랙(Dual-Track) SMR 점수 산출
+    - 트랙 A (복리 성장형): 꾸준한 영업이익 및 순이익 우상향 / 안정성
+    - 트랙 B (턴어라운드/가속도형): 적자 흑자전환 및 이익 가속도 폭발
+    """
+    if df_q.empty or len(df_q) < 5:
         return None
+        
     df = df_q.sort_values(["period_year", "period_quarter"]).copy()
     latest = df.iloc[-1]
-    prior = df[
+    
+    prior_year_rows = df[
         (df["period_year"] == latest["period_year"] - 1)
         & (df["period_quarter"] == latest["period_quarter"])
     ]
-    if prior.empty:
+    if prior_year_rows.empty:
         return None
-    prior = prior.iloc[-1]
+    prior = prior_year_rows.iloc[-1]
+    prev_q = df.iloc[-2] if len(df) >= 2 else latest
 
     rev_growth = _yoy_pct(latest["revenue"], prior["revenue"])
     op_margin_now = latest["operating_income"] / latest["revenue"] if latest["revenue"] else 0
@@ -264,19 +262,53 @@ def smr_metrics_from_quarterly(df_q):
 
     if any(pd.isna(x) for x in [rev_growth, margin_delta, roe_growth]):
         return None
+
+    # --- 투트랙 (Dual-Track) 스코어링 시스템 ---
+    score_track_a = 0  # 복리 성장형 트랙
+    score_track_b = 0  # 턴어라운드 / 가속도형 트랙
+
+    latest_op = latest["operating_income"]
+    prior_op = prior["operating_income"]
+    prev_q_op = prev_q["operating_income"]
+
+    # 1. 트랙 A: 복리 성장형 (Secular Growth) 평가
+    if latest_op > 0 and prior_op > 0:
+        op_growth_yoy = _yoy_pct(latest_op, prior_op)
+        if op_growth_yoy >= 15:
+            score_track_a += 50
+        elif op_growth_yoy > 0:
+            score_track_a += 25
+            
+        if rev_growth >= 10:
+            score_track_a += 30
+        elif rev_growth > 0:
+            score_track_a += 15
+            
+        if roe_now > 0.1:  # 우량 ROE 10% 이상
+            score_track_a += 20
+
+    # 2. 트랙 B: 턴어라운드 및 가속도형 (Turnaround & Momentum) 평가
+    if prior_op <= 0 and latest_op > 0:
+        score_track_b += 70  # 강력한 적자 흑자전환
+    elif latest_op > prior_op and latest_op > prev_q_op:
+        accel_bonus = _yoy_pct(latest_op, prior_op)
+        if not pd.isna(accel_bonus) and accel_bonus > 20:
+            score_track_b += 60
+        else:
+            score_track_b += 30
+
+    # 두 트랙 중 더 유리한 점수를 최종 composite 점수로 반영
+    composite = max(score_track_a, score_track_b)
+
     return {
         "rev_growth": rev_growth,
         "margin_delta": margin_delta,
         "roe_growth": roe_growth,
-        "composite": rev_growth * 0.4 + margin_delta * 0.3 + roe_growth * 0.3,
+        "composite": composite,
     }
 
 
 def assign_smr_grades(metrics_by_symbol, all_symbols=None):
-    """
-    전체 유니버스(all_symbols) 대비 SMR 등급.
-    재무 지표가 있는 종목만 5분위(A~E)로 나누고, 나머지는 E.
-    """
     valid = {s: m for s, m in metrics_by_symbol.items() if m is not None}
     if not valid:
         return {}
@@ -299,7 +331,6 @@ def assign_smr_grades(metrics_by_symbol, all_symbols=None):
 
 
 def collect_smr_metrics_for_universe(conn, symbols):
-    """repo_results 전 종목에 대해 SMR 입력 지표 수집."""
     metrics = {}
     for ticker in symbols:
         df_q = load_quarterly_df(conn, ticker)
@@ -310,7 +341,6 @@ def collect_smr_metrics_for_universe(conn, symbols):
 
 
 def build_financial_display_table(df_q, max_quarters=20):
-    """대시보드용: 최근 5년(20분기) 분기 재무 + 전년동기 대비 성장률."""
     if df_q.empty:
         return pd.DataFrame()
 
@@ -348,7 +378,6 @@ def build_financial_display_table(df_q, max_quarters=20):
 
 
 def sync_symbol_financials(conn, dart, ticker):
-    """단일 종목 재무 동기화 (필요 시에만 API 호출)."""
     mode = needs_financial_update(conn, ticker)
     if mode is None:
         return "skip"
@@ -364,7 +393,6 @@ def sync_symbol_financials(conn, dart, ticker):
 
 
 def ensure_ticker_financials(ticker, years_back=5):
-    """대시보드: DB에 재무가 없을 때만 DART 조회."""
     api_key = get_dart_api_key()
     if not api_key:
         return False
