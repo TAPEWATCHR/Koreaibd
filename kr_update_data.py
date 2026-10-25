@@ -91,7 +91,7 @@ def calculate_technical_metrics():
         df_krx["Sector"] = df_krx[t_col].astype(str).str.zfill(6).map(sector_map)
         print(f"    ✅  KIND 업종 매핑 완료 (샘플: {df_krx['Sector'].notna().sum()}개)")
     except Exception as e:
-        print(f" ⚠ ️ KIND 업종 정보 매핑 실패 ({e}), 기본값 사용.")
+        print(f" ⚠️  KIND 업종 정보 매핑 실패 ({e}), 기본값 사용.")
         df_krx["Sector"] = "기타업종"
 
     df_krx = df_krx[df_krx["Market"].isin(["KOSPI", "KOSDAQ"])].copy()
@@ -126,19 +126,29 @@ def calculate_technical_metrics():
             
             weighted_momentum = (ret_1m * 0.35) + (ret_3m * 0.25) + (ret_6m * 0.20) + (ret_12m * 0.20)
 
+            # 💡 [한국형 고도화 AD 수급 분석] 65거래일(약 3개월) 주기 + CLV(종가 위치 가중치) 적용
+            lookback_days = 65 
+            df_ad = df_hist.tail(lookback_days).copy()
+            
+            if len(df_ad) >= lookback_days:
+                high_low_range = df_ad["High"] - df_ad["Low"]
+                high_low_range = high_low_range.replace(0, 1e-5)
+                
+                # CLV (Close Location Value): 당일 고가/저가 범위 내에서 종가가 끝난 위치 (-1 ~ 1)
+                df_ad["CLV"] = ((df_ad["Close"] - df_ad["Low"]) - (df_ad["High"] - df_ad["Close"])) / high_low_range
+                
+                # 자금 흐름 볼륨 = CLV * 당일 거래량
+                df_ad["MoneyFlowVolume"] = df_ad["CLV"] * df_ad["Volume"]
+                
+                sum_money_flow = df_ad["MoneyFlowVolume"].sum()
+                total_vol = df_ad["Volume"].sum()
+                
+                ad_ratio = sum_money_flow / (total_vol + 1e-5)
+            else:
+                ad_ratio = 0.0
+
             vol_avg50 = volume.rolling(50).mean()
-            df_ad = pd.DataFrame({"Close": close, "Volume": volume, "AvgVol": vol_avg50}).tail(50)
-            df_ad["PrevClose"] = df_ad["Close"].shift(1)
-            df_ad = df_ad.dropna()
-
-            df_ad["ExcessVol"] = df_ad["Volume"] - df_ad["AvgVol"]
-            df_ad.loc[df_ad["ExcessVol"] < 0, "ExcessVol"] = 0
-
-            accum_vol = df_ad[(df_ad["Close"] > df_ad["PrevClose"])]["ExcessVol"].sum()
-            dist_vol = df_ad[(df_ad["Close"] < df_ad["PrevClose"])]["ExcessVol"].sum()
-
-            ad_ratio = accum_vol / (accum_vol + dist_vol + 1e-5)
-            adv_50_val = float(vol_avg50.iloc[-1] * current_price)
+            adv_50_val = float(vol_avg50.iloc[-1] * current_price) if not vol_avg50.empty else 0.0
 
             results.append({
                 "symbol": ticker,
@@ -193,7 +203,7 @@ def update_dart_financials(df_res):
 
     api_key = get_dart_api_key() or DART_API_KEY
     if not api_key or api_key == "YOUR_ACTUAL_DART_API_KEY":
-        print(" ⚠ ️ DART 인증키가 없어 재무·SMR 업데이트를 건너뜁니다.")
+        print(" ⚠️  DART 인증키가 없어 재무·SMR 업데이트를 건너뜁니다.")
         return
 
     if df_res.empty:
@@ -210,11 +220,11 @@ def update_dart_financials(df_res):
         if needs_financial_update(conn, t) is not None:
             targets_to_update.append(t)
 
-    print(f"   📊 전체 {len(targets)}종목 중 업데이트가 필요한 종목: {len(targets_to_update)}개")
+    print(f"    📊 전체 {len(targets)}종목 중 업데이트가 필요한 종목: {len(targets_to_update)}개")
 
     # 💡 100개로 축소 (안전한 수집)
     targets_to_update = targets_to_update[:100]
-    print(f"   🎯 오늘 수집할 대상은 {len(targets_to_update)}종목입니다.")
+    print(f"    🎯 오늘 수집할 대상은 {len(targets_to_update)}종목입니다.")
 
     updated, skipped, failed = 0, 0, 0
 
@@ -234,7 +244,7 @@ def update_dart_financials(df_res):
 
         if (i + 1) % 50 == 0:
             conn.commit()
-            print(f"   ... 진행률: {i+1}/{len(targets_to_update)} (갱신 {updated}, 실패 {failed})")
+            print(f"    ... 진행률: {i+1}/{len(targets_to_update)} (갱신 {updated}, 실패 {failed})")
 
     conn.commit()
 
