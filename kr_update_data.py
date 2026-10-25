@@ -42,7 +42,9 @@ def init_database():
             smr_grade TEXT,
             ad_grade TEXT,
             adv_50 REAL,
-            industry TEXT
+            industry TEXT,
+            high_52w REAL,
+            ma_50 REAL
         )
     """)
     cursor.execute("""
@@ -64,7 +66,6 @@ def calculate_technical_metrics():
 
     try:
         df_krx = fdr.StockListing("KRX")
-        # 💡 [핵심 최적화] KRX 서버 차단 방지를 위해 불러온 최신 리스트를 DB에 캐싱(저장)합니다.
         df_krx.to_sql("krx_tickers_cache", conn, if_exists="replace", index=False)
         print("    ✅ KRX 종목 리스트 최신화 및 DB 저장 완료")
     except Exception as e:
@@ -124,9 +125,11 @@ def calculate_technical_metrics():
             ret_6m = (current_price / close.iloc[-120]) - 1 if len(close) >= 120 else 0
             ret_12m = (current_price / close.iloc[-240]) - 1 if len(close) >= 240 else 0
             
-            weighted_momentum = (ret_1m * 0.35) + (ret_3m * 0.25) + (ret_6m * 0.20) + (ret_12m * 0.20)
+            # 💡 [중기 추세 중심 RS 가중치 재조정]
+            # 3m(35%), 6m(30%)에 높은 가중치를 주어 단기 테마 노이즈를 방어하고 단단한 우상향 종목 포착
+            weighted_momentum = (ret_3m * 0.35) + (ret_6m * 0.30) + (ret_12m * 0.20) + (ret_1m * 0.15)
 
-            # 💡 [한국형 고도화 AD 수급 분석] 65거래일(약 3개월) 주기 + CLV(종가 위치 가중치) 적용
+            # 💡 [한국형 AD 수급 분석] 65거래일(약 3개월) + CLV(종가 위치 가중치) 적용
             lookback_days = 65 
             df_ad = df_hist.tail(lookback_days).copy()
             
@@ -134,21 +137,22 @@ def calculate_technical_metrics():
                 high_low_range = df_ad["High"] - df_ad["Low"]
                 high_low_range = high_low_range.replace(0, 1e-5)
                 
-                # CLV (Close Location Value): 당일 고가/저가 범위 내에서 종가가 끝난 위치 (-1 ~ 1)
+                # CLV (Close Location Value): 당일 고가/저가 범위 내 종가 위치 (-1 ~ 1)
                 df_ad["CLV"] = ((df_ad["Close"] - df_ad["Low"]) - (df_ad["High"] - df_ad["Close"])) / high_low_range
-                
-                # 자금 흐름 볼륨 = CLV * 당일 거래량
                 df_ad["MoneyFlowVolume"] = df_ad["CLV"] * df_ad["Volume"]
                 
                 sum_money_flow = df_ad["MoneyFlowVolume"].sum()
                 total_vol = df_ad["Volume"].sum()
-                
                 ad_ratio = sum_money_flow / (total_vol + 1e-5)
             else:
                 ad_ratio = 0.0
 
             vol_avg50 = volume.rolling(50).mean()
             adv_50_val = float(vol_avg50.iloc[-1] * current_price) if not vol_avg50.empty else 0.0
+            
+            # 💡 [하방 지지 및 전고점 필터용 데이터 추출]
+            high_52w = float(close.tail(240).max())
+            ma_50 = float(close.tail(50).mean())
 
             results.append({
                 "symbol": ticker,
@@ -158,6 +162,8 @@ def calculate_technical_metrics():
                 "ad_ratio": ad_ratio,
                 "adv_50": adv_50_val,
                 "industry": sector,
+                "high_52w": high_52w,
+                "ma_50": ma_50,
             })
         except Exception:
             fail_count += 1
@@ -170,32 +176,9 @@ def calculate_technical_metrics():
 
     df_res = pd.DataFrame(results)
     
-    # 1. 당일 날것(Raw)의 RS 점수 구하기 (1 ~ 99)
-    df_res["raw_rs_score"] = pd.qcut(df_res["raw_momentum"].rank(method="first"), 99, labels=False) + 1
+    # 순위 기반 RS 점수 산출 (1 ~ 99)
+    df_res["rs_score"] = pd.qcut(df_res["raw_momentum"].rank(method="first"), 99, labels=False) + 1
 
-    # 2. 💡 [RS 스무딩(Smoothing) 처리] 최근 5거래일 이동평균 적용으로 노이즈 제어
-    smoothed_rs_list = []
-    for _, r in df_res.iterrows():
-        ticker = r["symbol"]
-        curr_rs = r["raw_rs_score"]
-        
-        # rs_history에서 해당 종목의 과거 최근 4개 기록 조회
-        query = """
-            SELECT rs_score FROM rs_history 
-            WHERE symbol = ? 
-            ORDER BY date DESC 
-            LIMIT 4
-        """
-        past_records = pd.read_sql(query, conn, params=(ticker,))["rs_score"].tolist()
-        
-        # 오늘 RS + 과거 RS(최대 4일)의 평균 계산
-        combined_5d = [curr_rs] + past_records
-        avg_rs = int(round(np.mean(combined_5d)))
-        smoothed_rs_list.append(avg_rs)
-
-    df_res["rs_score"] = smoothed_rs_list
-
-    # AD 등급 및 업종별 RS 점수 산출
     ad_labels = ["E", "D", "C", "B", "A"]
     df_res["ad_grade"] = pd.qcut(df_res["ad_ratio"].rank(method="first"), 5, labels=ad_labels).astype(str)
     
@@ -203,15 +186,13 @@ def calculate_technical_metrics():
     df_res["industry_rs_score"] = pd.qcut(industry_means.rank(method="first"), 99, labels=False) + 1
     df_res["smr_grade"] = "C"
 
-    # 결과 테이블 저장
     df_res[
         [
             "symbol", "name", "price", "rs_score", "industry_rs_score",
-            "smr_grade", "ad_grade", "adv_50", "industry",
+            "smr_grade", "ad_grade", "adv_50", "industry", "high_52w", "ma_50"
         ]
     ].to_sql("repo_results", conn, if_exists="replace", index=False)
 
-    # 오늘 스무딩 처리된 최종 RS 점수를 rs_history에 업서트
     for _, r in df_res.iterrows():
         try:
             conn.execute(
@@ -224,7 +205,7 @@ def calculate_technical_metrics():
     conn.commit()
     conn.close()
 
-    print(f" ✅  [2/4] 기술적 지표 저장 완료 (RS 5일 스무딩 적용): {len(df_res)}종목 (스킵/오류 {fail_count}건)")
+    print(f" ✅  [2/4] 기술적 지표 저장 완료 (중기 가중치 적용): {len(df_res)}종목 (스킵/오류 {fail_count}건)")
     return df_res
 
 def update_dart_financials(df_res):
@@ -238,7 +219,7 @@ def update_dart_financials(df_res):
     if df_res.empty:
         return
 
-    dart = OpenDartReader(api_key) # 💡 소문자 모듈 내 OpenDartReader 클래스 사용
+    dart = OpenDartReader(api_key)
     targets = df_res["symbol"].astype(str).str.zfill(6).tolist()
 
     conn = sqlite3.connect(DB_NAME)
@@ -251,7 +232,6 @@ def update_dart_financials(df_res):
 
     print(f"    📊 전체 {len(targets)}종목 중 업데이트가 필요한 종목: {len(targets_to_update)}개")
 
-    # 💡 100개로 축소 (안전한 수집)
     targets_to_update = targets_to_update[:100]
     print(f"    🎯 오늘 수집할 대상은 {len(targets_to_update)}종목입니다.")
 
@@ -306,7 +286,7 @@ def apply_smr_grades(df_res):
     df_res[
         [
             "symbol", "name", "price", "rs_score", "industry_rs_score",
-            "smr_grade", "ad_grade", "adv_50", "industry",
+            "smr_grade", "ad_grade", "adv_50", "industry", "high_52w", "ma_50"
         ]
     ].to_sql("repo_results", conn, if_exists="append", index=False)
 
