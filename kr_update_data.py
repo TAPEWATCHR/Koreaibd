@@ -169,13 +169,41 @@ def calculate_technical_metrics():
         return pd.DataFrame()
 
     df_res = pd.DataFrame(results)
-    df_res["rs_score"] = pd.qcut(df_res["raw_momentum"].rank(method="first"), 99, labels=False) + 1
+    
+    # 1. 당일 날것(Raw)의 RS 점수 구하기 (1 ~ 99)
+    df_res["raw_rs_score"] = pd.qcut(df_res["raw_momentum"].rank(method="first"), 99, labels=False) + 1
+
+    # 2. 💡 [RS 스무딩(Smoothing) 처리] 최근 5거래일 이동평균 적용으로 노이즈 제어
+    smoothed_rs_list = []
+    for _, r in df_res.iterrows():
+        ticker = r["symbol"]
+        curr_rs = r["raw_rs_score"]
+        
+        # rs_history에서 해당 종목의 과거 최근 4개 기록 조회
+        query = """
+            SELECT rs_score FROM rs_history 
+            WHERE symbol = ? 
+            ORDER BY date DESC 
+            LIMIT 4
+        """
+        past_records = pd.read_sql(query, conn, params=(ticker,))["rs_score"].tolist()
+        
+        # 오늘 RS + 과거 RS(최대 4일)의 평균 계산
+        combined_5d = [curr_rs] + past_records
+        avg_rs = int(round(np.mean(combined_5d)))
+        smoothed_rs_list.append(avg_rs)
+
+    df_res["rs_score"] = smoothed_rs_list
+
+    # AD 등급 및 업종별 RS 점수 산출
     ad_labels = ["E", "D", "C", "B", "A"]
     df_res["ad_grade"] = pd.qcut(df_res["ad_ratio"].rank(method="first"), 5, labels=ad_labels).astype(str)
+    
     industry_means = df_res.groupby("industry")["rs_score"].transform("mean")
     df_res["industry_rs_score"] = pd.qcut(industry_means.rank(method="first"), 99, labels=False) + 1
     df_res["smr_grade"] = "C"
 
+    # 결과 테이블 저장
     df_res[
         [
             "symbol", "name", "price", "rs_score", "industry_rs_score",
@@ -183,6 +211,7 @@ def calculate_technical_metrics():
         ]
     ].to_sql("repo_results", conn, if_exists="replace", index=False)
 
+    # 오늘 스무딩 처리된 최종 RS 점수를 rs_history에 업서트
     for _, r in df_res.iterrows():
         try:
             conn.execute(
@@ -195,7 +224,7 @@ def calculate_technical_metrics():
     conn.commit()
     conn.close()
 
-    print(f" ✅  [2/4] 기술적 지표 저장 완료: {len(df_res)}종목 (스킵/오류 {fail_count}건)")
+    print(f" ✅  [2/4] 기술적 지표 저장 완료 (RS 5일 스무딩 적용): {len(df_res)}종목 (스킵/오류 {fail_count}건)")
     return df_res
 
 def update_dart_financials(df_res):
@@ -209,7 +238,7 @@ def update_dart_financials(df_res):
     if df_res.empty:
         return
 
-    dart = OpenDartReader(api_key) # 💡 여기서 클래스를 소환하도록 변경
+    dart = OpenDartReader(api_key) # 💡 소문자 모듈 내 OpenDartReader 클래스 사용
     targets = df_res["symbol"].astype(str).str.zfill(6).tolist()
 
     conn = sqlite3.connect(DB_NAME)
