@@ -8,6 +8,7 @@ import time
 import os
 import requests
 import io
+import yfinance as yf
 from kr_financials import (
     DB_NAME,
     get_dart_api_key,
@@ -18,7 +19,7 @@ from kr_financials import (
     sync_symbol_financials,
     update_fetch_meta,
 )
-import OpenDartReader  # 💡 대소문자 오류 방지를 위해 소문자 모듈 사용
+import OpenDartReader  # 대소문자 오류 방지를 위해 소문자 모듈 사용
 
 # 환경변수 DART_API_KEY 우선, 없으면 로컬 기본값
 DART_API_KEY = os.environ.get(
@@ -61,24 +62,28 @@ def init_database():
     conn.close()
 
 def calculate_market_distribution_days():
-    """📈 [시장 수급 분석] 대표 시장 지수(코스닥 'KQ11' 기준)의 매집일 및 분산일 계산 후 DB 저장"""
+    """📈 [시장 수급 분석] 야후 파이낸스를 통한 코스닥 지수 매집일/분산일 계산 후 DB 저장"""
     print(" 🚀 [0/4] 시장 지수(코스닥) 매집일/분산일 수급 분석 중...")
     try:
-        # 코스닥 지수 데이터 수집 (필요시 'KS11'(코스피)로 변경 가능)
-        df_idx = fdr.DataReader('KQ11', '2025-01-01')
+        df_idx = yf.download('^KQ11', period="1y", interval="1d", progress=False)
         if df_idx.empty:
-            return
+            df_idx = yf.download('KSQ', period="1y", interval="1d", progress=False)
+            
+        if isinstance(df_idx.columns, pd.MultiIndex):
+            df_idx.columns = df_idx.columns.get_level_values(0)
+            
         df_idx = df_idx.reset_index()
+        df_idx = df_idx.dropna(subset=['Close', 'Volume'])
         
         df_idx['PrevClose'] = df_idx['Close'].shift(1)
         df_idx['PrevVolume'] = df_idx['Volume'].shift(1)
         df_idx['PctChange'] = df_idx['Close'].pct_change() * 100
         
         # 1. 매집일 조건: 지수 상승(> 0) AND 거래량 증가
-        df_idx['IsAccumulation'] = (df_idx['Close'] > df_idx['PrevClose']) & (df_idx['Volume'] > df_idx['PrevVolume'])
+        df_idx['IsAccumulation'] = ((df_idx['Close'] > df_idx['PrevClose']) & (df_idx['Volume'] > df_idx['PrevVolume'])).astype(int)
         
         # 2. 분산일 조건: 지수 하락률 0.2% 이상 AND 거래량 증가
-        df_idx['IsDistribution'] = (df_idx['PctChange'] <= -0.2) & (df_idx['Volume'] > df_idx['PrevVolume'])
+        df_idx['IsDistribution'] = ((df_idx['PctChange'] <= -0.2) & (df_idx['Volume'] > df_idx['PrevVolume'])).astype(int)
         
         conn = sqlite3.connect(DB_NAME)
         df_idx.to_sql('market_index_daily', conn, if_exists='replace', index=False)
@@ -122,7 +127,9 @@ def calculate_technical_metrics():
         print(f" ⚠️  KIND 업종 정보 매핑 실패 ({e}), 기본값 사용.")
         df_krx["Sector"] = "기타업종"
 
+    # 코스피/코스닥 필터링 및 6자리 순수 숫자 보통주 코드만 추출 (우선주/기타 종목 에러 방지)
     df_krx = df_krx[df_krx["Market"].isin(["KOSPI", "KOSDAQ"])].copy()
+    df_krx = df_krx[df_krx[t_col].astype(str).str.match(r'^\d{6}$')]
     df_krx["Sector"] = df_krx["Sector"].fillna("기타업종")
 
     print(f"총 {len(df_krx)}개 종목의 기술적 지표 연산을 시작합니다.")
@@ -140,6 +147,7 @@ def calculate_technical_metrics():
 
         try:
             df_hist = fdr.DataReader(ticker, start=start_date, end=today)
+            time.sleep(0.1)  # 💡 요청 과다(429) 방어를 위한 미세 딜레이
             if len(df_hist) < 240:
                 continue
 
@@ -323,7 +331,7 @@ def apply_smr_grades(df_res):
 
 if __name__ == "__main__":
     init_database()
-    calculate_market_distribution_days()  # 💡 시장 수급 분석 추가 실행
+    calculate_market_distribution_days()
     df_metrics = calculate_technical_metrics()
     update_dart_financials(df_metrics)
     apply_smr_grades(df_metrics)
