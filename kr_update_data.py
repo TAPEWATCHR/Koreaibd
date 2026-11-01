@@ -60,6 +60,33 @@ def init_database():
     conn.commit()
     conn.close()
 
+def calculate_market_distribution_days():
+    """📈 [시장 수급 분석] 대표 시장 지수(코스닥 'KQ11' 기준)의 매집일 및 분산일 계산 후 DB 저장"""
+    print(" 🚀 [0/4] 시장 지수(코스닥) 매집일/분산일 수급 분석 중...")
+    try:
+        # 코스닥 지수 데이터 수집 (필요시 'KS11'(코스피)로 변경 가능)
+        df_idx = fdr.DataReader('KQ11', '2025-01-01')
+        if df_idx.empty:
+            return
+        df_idx = df_idx.reset_index()
+        
+        df_idx['PrevClose'] = df_idx['Close'].shift(1)
+        df_idx['PrevVolume'] = df_idx['Volume'].shift(1)
+        df_idx['PctChange'] = df_idx['Close'].pct_change() * 100
+        
+        # 1. 매집일 조건: 지수 상승(> 0) AND 거래량 증가
+        df_idx['IsAccumulation'] = (df_idx['Close'] > df_idx['PrevClose']) & (df_idx['Volume'] > df_idx['PrevVolume'])
+        
+        # 2. 분산일 조건: 지수 하락률 0.2% 이상 AND 거래량 증가
+        df_idx['IsDistribution'] = (df_idx['PctChange'] <= -0.2) & (df_idx['Volume'] > df_idx['PrevVolume'])
+        
+        conn = sqlite3.connect(DB_NAME)
+        df_idx.to_sql('market_index_daily', conn, if_exists='replace', index=False)
+        conn.close()
+        print("    ✅ 시장 지수 매집일/분산일 DB 저장 완료")
+    except Exception as e:
+        print(f" ⚠️ 시장 수급 계산 중 오류 발생: {e}")
+
 def calculate_technical_metrics():
     print(" 🚀  [1/4] 한국거래소 상장 종목 및 세부 섹터 정보 수집 중...")
     conn = sqlite3.connect(DB_NAME)
@@ -126,7 +153,6 @@ def calculate_technical_metrics():
             ret_12m = (current_price / close.iloc[-240]) - 1 if len(close) >= 240 else 0
             
             # 💡 [중기 추세 중심 RS 가중치 재조정]
-            # 3m(35%), 6m(30%)에 높은 가중치를 주어 단기 테마 노이즈를 방어하고 단단한 우상향 종목 포착
             weighted_momentum = (ret_3m * 0.35) + (ret_6m * 0.30) + (ret_12m * 0.20) + (ret_1m * 0.15)
 
             # 💡 [한국형 AD 수급 분석] 65거래일(약 3개월) + CLV(종가 위치 가중치) 적용
@@ -137,7 +163,6 @@ def calculate_technical_metrics():
                 high_low_range = df_ad["High"] - df_ad["Low"]
                 high_low_range = high_low_range.replace(0, 1e-5)
                 
-                # CLV (Close Location Value): 당일 고가/저가 범위 내 종가 위치 (-1 ~ 1)
                 df_ad["CLV"] = ((df_ad["Close"] - df_ad["Low"]) - (df_ad["High"] - df_ad["Close"])) / high_low_range
                 df_ad["MoneyFlowVolume"] = df_ad["CLV"] * df_ad["Volume"]
                 
@@ -150,7 +175,6 @@ def calculate_technical_metrics():
             vol_avg50 = volume.rolling(50).mean()
             adv_50_val = float(vol_avg50.iloc[-1] * current_price) if not vol_avg50.empty else 0.0
             
-            # 💡 [하방 지지 및 전고점 필터용 데이터 추출]
             high_52w = float(close.tail(240).max())
             ma_50 = float(close.tail(50).mean())
 
@@ -176,7 +200,6 @@ def calculate_technical_metrics():
 
     df_res = pd.DataFrame(results)
     
-    # 순위 기반 RS 점수 산출 (1 ~ 99)
     df_res["rs_score"] = pd.qcut(df_res["raw_momentum"].rank(method="first"), 99, labels=False) + 1
 
     ad_labels = ["E", "D", "C", "B", "A"]
@@ -300,6 +323,7 @@ def apply_smr_grades(df_res):
 
 if __name__ == "__main__":
     init_database()
+    calculate_market_distribution_days()  # 💡 시장 수급 분석 추가 실행
     df_metrics = calculate_technical_metrics()
     update_dart_financials(df_metrics)
     apply_smr_grades(df_metrics)
