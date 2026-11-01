@@ -9,3 +9,4 @@ lxml
 html5lib
 plotly
 beautifulsoup4
+yfinance   # 👈 이 줄을 추가해주세요!
