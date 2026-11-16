@@ -50,7 +50,7 @@ def get_rs_history(ticker):
     conn.close()
     return hist
 
-# --- 📈 시장 지수 수급 데이터 로드 함수 추가 ---
+# --- 📈 시장 지수 수급 데이터 로드 함수 ---
 def get_market_distribution_data():
     if not os.path.exists(DB_NAME):
         return pd.DataFrame()
@@ -153,6 +153,7 @@ def get_financial_table(ticker):
     conn.close()
     return build_financial_display_table(df_q, max_quarters=20)
 
+# --- 🛠️ 커스텀 Plotly 트레이딩뷰 스타일 차트 렌더링 ---
 def render_custom_plotly_chart(ticker, timeframe):
     end_date = datetime.today()
     start_date = end_date - timedelta(days=365 * 2) 
@@ -264,6 +265,8 @@ def render_custom_plotly_chart(ticker, timeframe):
     fig.update_yaxes(tickformat=",d", gridcolor="#2A3143", tickfont=dict(color="#FFFFFF"), row=1, col=1)
     fig.update_yaxes(tickformat=",d", gridcolor="#2A3143", tickfont=dict(color="#FFFFFF"), row=2, col=1)
 
+    st.plotly_chart(fig, use_container_width=True)
+
 def run_dashboard():
     st.set_page_config(layout="wide", page_title="한국 주도주 수급 종합 터미널")
 
@@ -295,7 +298,7 @@ def run_dashboard():
         with st.sidebar:
             is_mobile = st.toggle(" 📱  모바일 화면 최적화", value=False)
             
-            # --- 📊 [사이드바] 시장 수급 상태판 추가 ---
+            # --- 📊 [사이드바] 시장 수급 상태판 ---
             st.divider()
             st.header("📊 시장 수급 상태 (오닐 IBD)")
             df_market = get_market_distribution_data()
